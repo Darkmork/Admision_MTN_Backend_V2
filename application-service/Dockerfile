@@ -1,32 +1,27 @@
 # Multi-stage build para application-service
-FROM eclipse-temurin:17-jdk-alpine AS builder
+FROM amazoncorretto:17-alpine AS builder
 
 # Instalar herramientas necesarias
-RUN apk add --no-cache curl tar
+RUN apk add --no-cache curl tar maven
 
 # Crear directorio de trabajo
 WORKDIR /workspace/app
 
 # Copiar archivos de configuración Maven
 COPY pom.xml .
-COPY .mvn .mvn
-COPY mvnw .
-
-# Hacer ejecutable el wrapper de Maven
-RUN chmod +x ./mvnw
 
 # Descargar dependencias (optimización de caché Docker)
-RUN ./mvnw dependency:go-offline -B
+RUN mvn dependency:go-offline -B
 
 # Copiar código fuente
 COPY src src
 
 # Construir aplicación
-RUN ./mvnw clean package -DskipTests
+RUN mvn clean package -DskipTests
 RUN mkdir -p target/dependency && (cd target/dependency; jar -xf ../*.jar)
 
 # Imagen de producción
-FROM eclipse-temurin:17-jre-alpine
+FROM amazoncorretto:17-alpine
 
 # Configurar zona horaria
 RUN apk add --no-cache tzdata

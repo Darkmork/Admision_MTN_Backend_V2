@@ -1,5 +1,5 @@
 server:
-  port: 8082
+  port: 8085
   servlet:
     context-path: /
   compression:
@@ -16,9 +16,9 @@ spring:
     
   # Datasource
   datasource:
-    url: ${DATABASE_URL:jdbc:postgresql://localhost:5434/notification_service_db}
-    username: ${DATABASE_USERNAME:notification_user}
-    password: ${DATABASE_PASSWORD:notification_pass}
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/Admisión_MTN_DB}
+    username: ${DATABASE_USERNAME:admin}
+    password: ${DATABASE_PASSWORD:admin123}
     driver-class-name: org.postgresql.Driver
     hikari:
       maximum-pool-size: 20

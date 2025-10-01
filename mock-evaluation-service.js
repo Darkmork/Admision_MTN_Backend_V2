@@ -1,0 +1,3315 @@
+const express = require('express');
+const { Pool } = require('pg');
+const CircuitBreaker = require('opossum');
+const app = express();
+const port = 8084;
+
+// Set timezone to America/Santiago for consistent date handling
+process.env.TZ = 'America/Santiago';
+
+// Database configuration with connection pooling
+const dbPool = new Pool({
+  host: 'localhost',
+  port: 5432,
+  database: 'Admisión_MTN_DB',
+  user: 'admin',
+  password: 'admin123',
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 2000,
+  query_timeout: 5000
+});
+
+// ============= DIFFERENTIATED CIRCUIT BREAKERS =============
+// 4 circuit breaker categories for Evaluation Service
+// (No necesita Heavy ni External - sin analytics complejos ni llamadas externas)
+
+// 1. Simple Queries (2s, 60% threshold, 20s reset) - Fast lookups
+const simpleQueryBreakerOptions = {
+  timeout: 2000,
+  errorThresholdPercentage: 60,
+  resetTimeout: 20000,
+  rollingCountTimeout: 10000,
+  rollingCountBuckets: 10,
+  name: 'EvaluationSimpleQueryBreaker'
+};
+
+// 2. Medium Queries (5s, 50% threshold, 30s reset) - Standard queries with joins
+const mediumQueryBreakerOptions = {
+  timeout: 5000,
+  errorThresholdPercentage: 50,
+  resetTimeout: 30000,
+  rollingCountTimeout: 10000,
+  rollingCountBuckets: 10,
+  name: 'EvaluationMediumQueryBreaker'
+};
+
+// 3. Write Operations (3s, 30% threshold, 45s reset) - Critical data mutations
+const writeOperationBreakerOptions = {
+  timeout: 3000,
+  errorThresholdPercentage: 30,
+  resetTimeout: 45000,
+  rollingCountTimeout: 10000,
+  rollingCountBuckets: 10,
+  name: 'EvaluationWriteBreaker'
+};
+
+// Create circuit breakers
+const simpleQueryBreaker = new CircuitBreaker(
+  async (client, query, params) => await client.query(query, params),
+  simpleQueryBreakerOptions
+);
+
+const mediumQueryBreaker = new CircuitBreaker(
+  async (client, query, params) => await client.query(query, params),
+  mediumQueryBreakerOptions
+);
+
+const writeOperationBreaker = new CircuitBreaker(
+  async (client, query, params) => await client.query(query, params),
+  writeOperationBreakerOptions
+);
+
+// Event listeners for all breakers
+const setupBreakerEvents = (breaker, name) => {
+  breaker.on('open', () => {
+    console.error(`⚠️ [Circuit Breaker ${name}] OPEN - Too many failures in evaluation service`);
+  });
+
+  breaker.on('halfOpen', () => {
+    console.warn(`🔄 [Circuit Breaker ${name}] HALF-OPEN - Testing recovery`);
+  });
+
+  breaker.on('close', () => {
+    console.log(`✅ [Circuit Breaker ${name}] CLOSED - Evaluation service recovered`);
+  });
+
+  breaker.fallback(() => {
+    throw new Error(`Service temporarily unavailable - ${name} circuit breaker open`);
+  });
+};
+
+// Setup events for all breakers
+setupBreakerEvents(simpleQueryBreaker, 'Simple');
+setupBreakerEvents(mediumQueryBreaker, 'Medium');
+setupBreakerEvents(writeOperationBreaker, 'Write');
+
+// Legacy breaker for backward compatibility (maps to medium query breaker)
+const queryWithCircuitBreaker = mediumQueryBreaker;
+
+// Simple in-memory cache with TTL
+class SimpleCache {
+  constructor() {
+    this.cache = new Map();
+    this.stats = { hits: 0, misses: 0 };
+  }
+
+  set(key, value, ttlMs = 300000) {
+    const expiresAt = Date.now() + ttlMs;
+    this.cache.set(key, { value, expiresAt, createdAt: Date.now() });
+  }
+
+  get(key) {
+    const item = this.cache.get(key);
+    if (!item) {
+      this.stats.misses++;
+      return null;
+    }
+
+    if (Date.now() > item.expiresAt) {
+      this.cache.delete(key);
+      this.stats.misses++;
+      return null;
+    }
+
+    this.stats.hits++;
+    return item.value;
+  }
+
+  clear(keyPattern) {
+    if (keyPattern) {
+      let cleared = 0;
+      for (const key of this.cache.keys()) {
+        if (key.includes(keyPattern)) {
+          this.cache.delete(key);
+          cleared++;
+        }
+      }
+      return cleared;
+    } else {
+      const size = this.cache.size;
+      this.cache.clear();
+      return size;
+    }
+  }
+
+  size() {
+    return this.cache.size;
+  }
+
+  getStats() {
+    const total = this.stats.hits + this.stats.misses;
+    return {
+      ...this.stats,
+      total,
+      hitRate: total > 0 ? ((this.stats.hits / total) * 100).toFixed(2) + '%' : '0%'
+    };
+  }
+}
+
+// Initialize cache
+const evaluationCache = new SimpleCache();
+
+// Periodic cleanup of expired entries (every 5 minutes)
+setInterval(() => {
+  const now = Date.now();
+  let cleaned = 0;
+  for (const [key, item] of evaluationCache.cache.entries()) {
+    if (now > item.expiresAt) {
+      evaluationCache.cache.delete(key);
+      cleaned++;
+    }
+  }
+  if (cleaned > 0) {
+    console.log(`[Cache] Cleaned ${cleaned} expired entries`);
+  }
+}, 300000);
+
+app.use(express.json());
+
+// CORS middleware - commented out because NGINX handles it
+// app.use((req, res, next) => {
+//   res.header('Access-Control-Allow-Origin', '*');
+//   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+//   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+//   
+//   if (req.method === 'OPTIONS') {
+//     res.sendStatus(200);
+//   } else {
+//     next();
+//   }
+// });
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'UP', 
+    service: 'evaluation-service',
+    port: port,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Mock evaluation endpoints
+app.get('/api/evaluations', (req, res) => {
+  res.json({
+    message: 'Evaluations from evaluation-service microservice',
+    evaluations: [
+      { id: 1, studentId: 1, type: 'ACADEMIC', score: 85 },
+      { id: 2, studentId: 2, type: 'PSYCHOLOGICAL', score: 92 }
+    ]
+  });
+});
+
+// Datos de entrevistadores disponibles (basados en los usuarios del sistema de gestión)
+const interviewers = [
+  {
+    id: 24,
+    name: 'María Elena Sánchez Cortés',
+    role: 'TEACHER',
+    subject: 'Matemáticas',
+    educationalLevel: 'Primaria',
+    scheduleCount: 3
+  },
+  {
+    id: 25,
+    name: 'Dr. Roberto Andrés Vega Muñoz',
+    role: 'PSYCHOLOGIST',
+    subject: null,
+    educationalLevel: 'Todos los niveles',
+    scheduleCount: 5
+  },
+  {
+    id: 26,
+    name: 'Carmen Isabel Rojas Fernández',
+    role: 'COORDINATOR',
+    subject: 'Ciencias Naturales',
+    educationalLevel: 'Secundaria',
+    scheduleCount: 2
+  },
+  {
+    id: 27,
+    name: 'Prof. Juan Carlos Montenegro Silva',
+    role: 'CYCLE_DIRECTOR',
+    subject: 'Educación Física',
+    educationalLevel: 'Básica',
+    scheduleCount: 4
+  },
+  {
+    id: 28,
+    name: 'Ana María Gutierrez Valdés',
+    role: 'TEACHER',
+    subject: 'Lenguaje y Literatura',
+    educationalLevel: 'Primaria',
+    scheduleCount: 6
+  },
+  {
+    id: 29,
+    name: 'Luis Fernando Castro Morales',
+    role: 'TEACHER',
+    subject: 'Historia y Geografía',
+    educationalLevel: 'Secundaria',
+    scheduleCount: 2
+  }
+];
+
+// Endpoint público para obtener entrevistadores disponibles
+app.get('/api/interviews/public/interviewers', async (req, res) => {
+  console.log('📋 Solicitud de entrevistadores disponibles');
+
+  // Check cache first
+  const cacheKey = 'interviews:public:interviewers';
+  const cached = evaluationCache.get(cacheKey);
+  if (cached) {
+    console.log('[Cache HIT] interviews:public:interviewers');
+    return res.json(cached);
+  }
+  console.log('[Cache MISS] interviews:public:interviewers');
+
+  const client = await dbPool.connect();
+  try {
+    // Consultar directamente la base de datos para obtener usuarios con horarios
+    const query = `
+      SELECT
+        u.id,
+        CONCAT(u.first_name, ' ', u.last_name) as name,
+        u.role,
+        u.subject,
+        u.educational_level,
+        COUNT(s.id) as schedule_count
+      FROM users u
+      INNER JOIN interviewer_schedules s ON u.id = s.interviewer_id
+      WHERE u.active = true
+        AND s.is_active = true
+        AND u.role IN ('TEACHER', 'COORDINATOR', 'CYCLE_DIRECTOR', 'PSYCHOLOGIST', 'ADMIN')
+      GROUP BY u.id, u.first_name, u.last_name, u.role, u.subject, u.educational_level
+      HAVING COUNT(s.id) > 0
+      ORDER BY u.first_name, u.last_name;
+    `;
+
+    const result = await client.query(query);
+
+    // Formatear la respuesta para que coincida con el formato esperado
+    const activeInterviewers = result.rows.map(row => ({
+      id: row.id,
+      name: row.name,
+      role: row.role,
+      subject: row.subject,
+      educationalLevel: row.educational_level || (row.role === 'PSYCHOLOGIST' ? 'Todos los niveles' : 'Sin especificar'),
+      scheduleCount: parseInt(row.schedule_count)
+    }));
+
+    console.log(`✅ Encontrados ${activeInterviewers.length} entrevistadores activos`);
+
+    // Cache before sending response (5 minutes)
+    evaluationCache.set(cacheKey, activeInterviewers, 300000);
+    res.json(activeInterviewers);
+
+  } catch (error) {
+    console.error('❌ Error obteniendo entrevistadores:', error);
+
+    // Como fallback, usar datos mockeados
+    const activeInterviewers = interviewers.filter(interviewer => interviewer.scheduleCount > 0);
+    res.json(activeInterviewers);
+  } finally {
+    client.release();
+  }
+});
+
+// Endpoint público para obtener información completa de entrevistas
+app.get('/api/interviews/public/complete', (req, res) => {
+  console.log('📋 Solicitud de información completa de entrevistas');
+  
+  // Combinar entrevistas con información de entrevistadores y estudiantes
+  const completeInterviews = interviews.map(interview => {
+    // Buscar el entrevistador correspondiente
+    const interviewer = interviewers.find(i => i.id === interview.interviewerId);
+    
+    // Mock data de estudiante basado en applicationId
+    const studentMockData = {
+      1: { id: 1, firstName: 'Ana', lastName: 'García Rodríguez', rut: '20123456-7' },
+      2: { id: 2, firstName: 'Carlos', lastName: 'Martínez López', rut: '20234567-8' },
+      3: { id: 3, firstName: 'María', lastName: 'Jiménez Valdez', rut: '20345678-9' },
+      4: { id: 4, firstName: 'Pedro', lastName: 'Sánchez Díaz', rut: '20456789-0' }
+    };
+    
+    const student = studentMockData[interview.applicationId] || {
+      id: interview.applicationId,
+      firstName: 'Estudiante',
+      lastName: `N°${interview.applicationId}`,
+      rut: `2012345${interview.applicationId}-${interview.applicationId}`
+    };
+    
+    return {
+      ...interview,
+      interviewer: {
+        id: interviewer?.id,
+        name: interviewer?.name,
+        role: interviewer?.role,
+        subject: interviewer?.subject
+      },
+      student: {
+        id: student.id,
+        firstName: student.firstName,
+        lastName: student.lastName,
+        fullName: `${student.firstName} ${student.lastName}`,
+        rut: student.rut
+      },
+      application: {
+        id: interview.applicationId,
+        studentId: student.id,
+        status: 'ACTIVE'
+      }
+    };
+  });
+  
+  res.json({
+    success: true,
+    data: completeInterviews,
+    count: completeInterviews.length,
+    summary: {
+      total: completeInterviews.length,
+      scheduled: completeInterviews.filter(i => i.status === 'SCHEDULED').length,
+      completed: completeInterviews.filter(i => i.status === 'COMPLETED').length,
+      cancelled: completeInterviews.filter(i => i.status === 'CANCELLED').length
+    }
+  });
+});
+
+// Endpoint para obtener estudiantes disponibles para programar entrevistas
+app.get('/api/interviews/students', async (req, res) => {
+  console.log('👥 Solicitud de estudiantes disponibles para entrevistas');
+
+  try {
+    // Obtener aplicaciones desde el servicio de aplicaciones
+    const applicationsResponse = await fetch('http://localhost:8083/api/applications');
+    if (!applicationsResponse.ok) {
+      throw new Error('Error obteniendo aplicaciones');
+    }
+
+    const applications = await applicationsResponse.json();
+
+    // Filtrar y transformar estudiantes disponibles
+    const availableStudents = applications
+      .filter(app => app && app.student && app.student.firstName && app.student.lastName)
+      .map(app => ({
+        id: app.id,
+        applicationId: app.id,
+        firstName: app.student.firstName,
+        lastName: app.student.lastName,
+        fullName: app.student.fullName || `${app.student.firstName} ${app.student.lastName}`,
+        rut: app.student.rut,
+        grade: app.student.gradeApplied,
+        status: app.status,
+        email: app.student.email || '',
+        phone: app.father?.phone || app.mother?.phone || '',
+        submissionDate: app.submissionDate
+      }))
+      .sort((a, b) => a.lastName.localeCompare(b.lastName));
+
+    console.log(`✅ Enviando ${availableStudents.length} estudiantes disponibles`);
+
+    res.json({
+      success: true,
+      data: availableStudents,
+      count: availableStudents.length
+    });
+
+  } catch (error) {
+    console.error('❌ Error obteniendo estudiantes:', error);
+
+    // Fallback con datos mock si falla la conexión con aplicaciones
+    const mockStudents = [
+      {
+        id: 1,
+        applicationId: 1,
+        firstName: 'Juan',
+        lastName: 'Pérez González',
+        fullName: 'Juan Pérez González',
+        rut: '20001001-1',
+        grade: 'PRIMERO_BASICO',
+        status: 'PENDING',
+        email: 'juan@example.com',
+        phone: '+56912001001',
+        submissionDate: '2025-08-24T16:32:47.864Z'
+      },
+      {
+        id: 2,
+        applicationId: 2,
+        firstName: 'María',
+        lastName: 'López Silva',
+        fullName: 'María López Silva',
+        rut: '20001002-K',
+        grade: 'SEGUNDO_BASICO',
+        status: 'UNDER_REVIEW',
+        email: 'maria@example.com',
+        phone: '+56912002001',
+        submissionDate: '2025-08-26T16:32:47.864Z'
+      }
+    ];
+
+    res.json({
+      success: true,
+      data: mockStudents,
+      count: mockStudents.length,
+      note: 'Datos mock - servicio de aplicaciones no disponible'
+    });
+  }
+});
+
+// Endpoint para obtener slots disponibles para agendamiento
+app.get('/api/interviews/available-slots', (req, res) => {
+  const { interviewerId, date, duration } = req.query;
+  
+  console.log(`🕒 Solicitud de horarios disponibles para entrevistador ${interviewerId} en fecha ${date} con duración ${duration} minutos`);
+  
+  // Verificar que el entrevistador existe
+  const interviewer = interviewers.find(i => i.id === parseInt(interviewerId));
+  if (!interviewer) {
+    return res.status(404).json({
+      success: false,
+      error: 'Entrevistador no encontrado'
+    });
+  }
+  
+  // Simular slots disponibles basados en un horario típico de trabajo
+  const availableSlots = [];
+  const requestDate = new Date(date);
+  const dayOfWeek = requestDate.getDay(); // 0 = Domingo, 1 = Lunes, etc.
+  
+  // Solo generar slots para días laborables (Lunes a Viernes)
+  if (dayOfWeek >= 1 && dayOfWeek <= 5) {
+    // Horarios típicos: 9:00-12:00 y 14:00-17:00
+    const morningSlots = [
+      '09:00', '09:30', '10:00', '10:30', '11:00', '11:30'
+    ];
+    const afternoonSlots = [
+      '14:00', '14:30', '15:00', '15:30', '16:00', '16:30'
+    ];
+    
+    // Combinar ambos turnos
+    const allSlots = [...morningSlots, ...afternoonSlots];
+    
+    // Simular algunos slots ocupados (para hacer más realista)
+    const occupiedSlots = ['10:00', '15:00', '16:30']; // Algunos horarios ya ocupados
+    
+    // Filtrar slots disponibles
+    allSlots.forEach(slot => {
+      if (!occupiedSlots.includes(slot)) {
+        availableSlots.push({
+          time: slot,
+          available: true,
+          duration: parseInt(duration) || 60
+        });
+      }
+    });
+  }
+  
+  res.json({
+    success: true,
+    data: {
+      date: date,
+      interviewerId: parseInt(interviewerId),
+      duration: parseInt(duration) || 60,
+      availableSlots: availableSlots
+    }
+  });
+});
+
+// Endpoint para obtener disponibilidad de entrevistadores en un rango de fechas
+app.get('/api/interviews/interviewer-availability', (req, res) => {
+  const { interviewerId, startDate, endDate } = req.query;
+  
+  console.log(`📅 Solicitud de disponibilidad para entrevistador ${interviewerId} desde ${startDate} hasta ${endDate}`);
+  
+  // Verificar que el entrevistador existe
+  const interviewer = interviewers.find(i => i.id === parseInt(interviewerId));
+  if (!interviewer) {
+    return res.status(404).json({
+      success: false,
+      error: 'Entrevistador no encontrado'
+    });
+  }
+  
+  // Validar fechas
+  if (!startDate || !endDate) {
+    return res.status(400).json({
+      success: false,
+      error: 'Se requieren las fechas de inicio y fin'
+    });
+  }
+  
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+  
+  if (start > end) {
+    return res.status(400).json({
+      success: false,
+      error: 'La fecha de inicio debe ser anterior a la fecha de fin'
+    });
+  }
+  
+  // Generar disponibilidad para cada día en el rango
+  const availability = [];
+  const currentDate = new Date(start);
+  
+  while (currentDate <= end) {
+    const dayOfWeek = currentDate.getDay(); // 0 = Domingo, 1 = Lunes, etc.
+    const dateString = currentDate.toISOString().split('T')[0];
+    
+    // Solo días laborables (Lunes a Viernes)
+    if (dayOfWeek >= 1 && dayOfWeek <= 5) {
+      // Horarios típicos del entrevistador
+      const morningSlots = [
+        { time: '09:00:00', duration: 60, available: true },
+        { time: '10:00:00', duration: 60, available: Math.random() > 0.3 }, // 70% disponible
+        { time: '11:00:00', duration: 60, available: Math.random() > 0.4 }  // 60% disponible
+      ];
+      
+      const afternoonSlots = [
+        { time: '14:00:00', duration: 60, available: Math.random() > 0.2 }, // 80% disponible
+        { time: '15:00:00', duration: 60, available: Math.random() > 0.3 }, // 70% disponible
+        { time: '16:00:00', duration: 60, available: Math.random() > 0.5 }  // 50% disponible
+      ];
+      
+      const daySlots = [...morningSlots, ...afternoonSlots].filter(slot => slot.available);
+      
+      availability.push({
+        date: dateString,
+        dayOfWeek: ['DOMINGO', 'LUNES', 'MARTES', 'MIÉRCOLES', 'JUEVES', 'VIERNES', 'SÁBADO'][dayOfWeek],
+        isWorkingDay: true,
+        totalSlots: morningSlots.length + afternoonSlots.length,
+        availableSlots: daySlots.length,
+        slots: daySlots.map(slot => ({
+          startTime: slot.time,
+          duration: slot.duration,
+          available: slot.available
+        }))
+      });
+    } else {
+      // Fin de semana - no disponible
+      availability.push({
+        date: dateString,
+        dayOfWeek: ['DOMINGO', 'LUNES', 'MARTES', 'MIÉRCOLES', 'JUEVES', 'VIERNES', 'SÁBADO'][dayOfWeek],
+        isWorkingDay: false,
+        totalSlots: 0,
+        availableSlots: 0,
+        slots: []
+      });
+    }
+    
+    // Avanzar al siguiente día
+    currentDate.setDate(currentDate.getDate() + 1);
+  }
+  
+  // Calcular estadísticas generales
+  const totalWorkingDays = availability.filter(day => day.isWorkingDay).length;
+  const totalAvailableSlots = availability.reduce((sum, day) => sum + day.availableSlots, 0);
+  const totalSlots = availability.reduce((sum, day) => sum + day.totalSlots, 0);
+  
+  res.json({
+    success: true,
+    data: {
+      interviewerId: parseInt(interviewerId),
+      interviewer: {
+        id: interviewer.id,
+        name: interviewer.name,
+        role: interviewer.role,
+        subject: interviewer.subject
+      },
+      period: {
+        startDate,
+        endDate,
+        totalDays: availability.length,
+        workingDays: totalWorkingDays
+      },
+      summary: {
+        totalSlots,
+        availableSlots: totalAvailableSlots,
+        occupiedSlots: totalSlots - totalAvailableSlots,
+        availabilityRate: totalSlots > 0 ? ((totalAvailableSlots / totalSlots) * 100).toFixed(1) : 0
+      },
+      dailyAvailability: availability
+    }
+  });
+});
+
+// Mock de entrevistas agendadas
+const interviews = [
+  {
+    id: 1,
+    applicationId: 1,
+    interviewerId: 24,
+    scheduledDate: '2025-09-05T13:30:00Z',
+    duration: 60,
+    type: 'FAMILY',
+    mode: 'IN_PERSON',
+    status: 'SCHEDULED',
+    location: 'Sala de entrevistas 1',
+    notes: 'Primera entrevista familiar',
+    createdAt: '2025-09-01T10:00:00Z'
+  },
+  {
+    id: 2,
+    applicationId: 2,
+    interviewerId: 25,
+    scheduledDate: '2025-09-06T10:00:00Z',
+    duration: 45,
+    type: 'PSYCHOLOGICAL',
+    mode: 'IN_PERSON',
+    status: 'COMPLETED',
+    location: 'Oficina de psicología',
+    notes: 'Evaluación psicológica inicial',
+    result: 'APPROVED',
+    score: 85,
+    createdAt: '2025-08-28T14:30:00Z'
+  }
+];
+
+// Endpoint para crear una nueva entrevista
+app.post('/api/interviews', async (req, res) => {
+  const {
+    applicationId,
+    interviewerId,
+    scheduledDate,
+    scheduledTime,  // Añadir scheduledTime
+    duration,
+    type,
+    mode,
+    location,
+    notes
+  } = req.body;
+
+  console.log('📝 Creando nueva entrevista:', req.body);
+
+  // Validar datos requeridos
+  if (!applicationId || !interviewerId || !scheduledDate || !type) {
+    return res.status(400).json({
+      success: false,
+      error: 'Faltan campos requeridos: applicationId, interviewerId, scheduledDate, type'
+    });
+  }
+
+  // Validar tipos permitidos según DB constraints
+  const validInterviewTypes = ['INDIVIDUAL', 'FAMILY', 'PSYCHOLOGICAL', 'ACADEMIC', 'BEHAVIORAL'];
+  if (!validInterviewTypes.includes(type)) {
+    return res.status(400).json({
+      success: false,
+      error: `Tipo de entrevista inválido. Tipos permitidos: ${validInterviewTypes.join(', ')}`,
+      validTypes: validInterviewTypes
+    });
+  }
+
+  // Validar modo de entrevista si se proporciona
+  const validModes = ['IN_PERSON', 'VIRTUAL', 'PHONE'];
+  if (mode && !validModes.includes(mode)) {
+    return res.status(400).json({
+      success: false,
+      error: `Modo de entrevista inválido. Modos permitidos: ${validModes.join(', ')}`,
+      validModes: validModes
+    });
+  }
+
+  // Validar y normalizar fecha/hora con zona horaria Chile
+  let normalizedScheduledDate;
+  try {
+    // Si tenemos scheduledTime separado, combinar con scheduledDate
+    let fullDateTime;
+    if (scheduledTime) {
+      // scheduledDate viene como YYYY-MM-DD y scheduledTime como HH:MM
+      fullDateTime = `${scheduledDate}T${scheduledTime}:00`;
+      console.log('📅 Combinando fecha y hora:', {
+        date: scheduledDate,
+        time: scheduledTime,
+        combined: fullDateTime
+      });
+    } else {
+      // Si no hay scheduledTime, asumir que scheduledDate ya tiene la hora
+      fullDateTime = scheduledDate;
+    }
+
+    const inputDate = new Date(fullDateTime);
+    if (isNaN(inputDate.getTime())) {
+      return res.status(400).json({
+        success: false,
+        error: 'Formato de fecha/hora inválido'
+      });
+    }
+
+    // Verificar que la fecha no sea en el pasado (con tolerancia de 1 hora para evitar problemas de timezone)
+    const now = new Date();
+    now.setHours(now.getHours() - 1); // Tolerancia de 1 hora
+    if (inputDate < now) {
+      return res.status(400).json({
+        success: false,
+        error: 'La fecha de la entrevista no puede ser en el pasado'
+      });
+    }
+
+    // Crear fecha local en formato simple YYYY-MM-DD HH:MM:SS para PostgreSQL
+    const year = inputDate.getFullYear();
+    const month = String(inputDate.getMonth() + 1).padStart(2, '0');
+    const day = String(inputDate.getDate()).padStart(2, '0');
+    const hours = String(inputDate.getHours()).padStart(2, '0');
+    const minutes = String(inputDate.getMinutes()).padStart(2, '0');
+    const seconds = String(inputDate.getSeconds()).padStart(2, '0');
+    normalizedScheduledDate = `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+
+    console.log('📅 Fecha normalizada:', {
+      original: scheduledDate,
+      time: scheduledTime,
+      combined: fullDateTime,
+      parsed: inputDate,
+      normalized: normalizedScheduledDate
+    });
+
+  } catch (error) {
+    return res.status(400).json({
+      success: false,
+      error: 'Error procesando la fecha de la entrevista',
+      details: error.message
+    });
+  }
+
+  const client = await dbPool.connect();
+  try {
+    // Insertar la nueva entrevista en la base de datos
+    const insertQuery = `
+      INSERT INTO interviews (
+        application_id,
+        interviewer_id,
+        scheduled_date,
+        duration_minutes,
+        interview_type,
+        status,
+        notes,
+        location,
+        created_at,
+        updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+      RETURNING id, application_id as "applicationId", interviewer_id as "interviewerId",
+               scheduled_date as "scheduledDate", duration_minutes as duration,
+               interview_type as type, status, notes, location,
+               created_at as "createdAt", updated_at as "updatedAt"
+    `;
+
+    const values = [
+      parseInt(applicationId),
+      parseInt(interviewerId),
+      normalizedScheduledDate,
+      parseInt(duration) || 60,
+      type,
+      'SCHEDULED',
+      notes || '',
+      location || 'Por asignar'
+    ];
+
+    console.log('🗄️ Ejecutando query INSERT:', insertQuery);
+    console.log('📊 Valores:', values);
+
+    const result = await client.query(insertQuery, values);
+    const newInterview = result.rows[0];
+
+    console.log('✅ Entrevista creada exitosamente:', newInterview);
+
+    // También agregar al array en memoria para compatibilidad con otros endpoints
+    interviews.push({
+      id: newInterview.id,
+      applicationId: newInterview.applicationId,
+      interviewerId: newInterview.interviewerId,
+      scheduledDate: newInterview.scheduledDate,
+      duration: newInterview.duration,
+      type: newInterview.type,
+      mode: mode || 'IN_PERSON',
+      status: newInterview.status,
+      location: newInterview.location,
+      notes: newInterview.notes,
+      createdAt: newInterview.createdAt
+    });
+
+    res.status(201).json({
+      success: true,
+      data: {
+        id: newInterview.id,
+        applicationId: newInterview.applicationId,
+        interviewerId: newInterview.interviewerId,
+        scheduledDate: newInterview.scheduledDate,
+        duration: newInterview.duration,
+        type: newInterview.type,
+        mode: mode || 'IN_PERSON',
+        status: newInterview.status,
+        location: newInterview.location,
+        notes: newInterview.notes,
+        createdAt: newInterview.createdAt
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error creando entrevista:', error);
+
+    // Manejar errores específicos de constraint violations
+    if (error.message && error.message.includes('check constraint')) {
+      if (error.message.includes('interview_type_check')) {
+        return res.status(400).json({
+          success: false,
+          error: 'Tipo de entrevista inválido',
+          details: 'El tipo debe ser uno de: INDIVIDUAL, FAMILY, PSYCHOLOGICAL, ACADEMIC, BEHAVIORAL',
+          validTypes: ['INDIVIDUAL', 'FAMILY', 'PSYCHOLOGICAL', 'ACADEMIC', 'BEHAVIORAL']
+        });
+      }
+      if (error.message.includes('status_check')) {
+        return res.status(400).json({
+          success: false,
+          error: 'Estado de entrevista inválido',
+          details: 'El estado debe ser uno de: SCHEDULED, CONFIRMED, IN_PROGRESS, COMPLETED, CANCELLED, NO_SHOW, RESCHEDULED'
+        });
+      }
+    }
+
+    // Manejar errores de foreign key (applicationId o interviewerId inválidos)
+    if (error.message && error.message.includes('foreign key constraint')) {
+      return res.status(400).json({
+        success: false,
+        error: 'ID de referencia inválido',
+        details: 'Verifique que applicationId e interviewerId sean válidos'
+      });
+    }
+
+    // Error genérico para casos no manejados
+    res.status(500).json({
+      success: false,
+      error: 'Error interno del servidor al crear la entrevista',
+      details: error.message
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// Endpoint para obtener entrevistas (con filtros)
+app.get('/api/interviews', async (req, res) => {
+  const { applicationId, interviewerId, status, date } = req.query;
+
+  console.log('📋 Obteniendo entrevistas con filtros:', req.query);
+
+  const client = await dbPool.connect();
+  try {
+    let query = `
+      SELECT
+        i.id,
+        i.application_id,
+        i.interviewer_id,
+        i.scheduled_date,
+        i.duration_minutes,
+        i.status,
+        i.interview_type,
+        i.notes,
+        i.created_at,
+        s.first_name || ' ' || s.paternal_last_name as student_name,
+        u.first_name || ' ' || u.last_name as interviewer_name
+      FROM interviews i
+      JOIN applications a ON a.id = i.application_id
+      JOIN students s ON s.id = a.student_id
+      JOIN users u ON u.id = i.interviewer_id
+      WHERE 1=1
+    `;
+
+    const params = [];
+    let paramCount = 0;
+
+    if (applicationId) {
+      paramCount++;
+      query += ` AND i.application_id = $${paramCount}`;
+      params.push(parseInt(applicationId));
+    }
+
+    if (interviewerId) {
+      paramCount++;
+      query += ` AND i.interviewer_id = $${paramCount}`;
+      params.push(parseInt(interviewerId));
+    }
+
+    if (status) {
+      paramCount++;
+      query += ` AND i.status = $${paramCount}`;
+      params.push(status);
+    }
+
+    if (date) {
+      paramCount++;
+      query += ` AND DATE(i.scheduled_date) = $${paramCount}`;
+      params.push(date);
+    }
+
+    query += ` ORDER BY i.scheduled_date`;
+
+    const result = await client.query(query, params);
+
+    const formattedInterviews = result.rows.map(row => {
+      // Formatear fecha en zona horaria local (Chile) sin conversión UTC
+      const localDate = new Date(row.scheduled_date);
+      const year = localDate.getFullYear();
+      const month = String(localDate.getMonth() + 1).padStart(2, '0');
+      const day = String(localDate.getDate()).padStart(2, '0');
+      const hours = String(localDate.getHours()).padStart(2, '0');
+      const minutes = String(localDate.getMinutes()).padStart(2, '0');
+      const seconds = String(localDate.getSeconds()).padStart(2, '0');
+
+      // Formato ISO local sin 'Z' para evitar problemas de zona horaria
+      const localISOString = `${year}-${month}-${day}T${hours}:${minutes}:${seconds}`;
+
+      return {
+        id: row.id,
+        applicationId: row.application_id,
+        interviewerId: row.interviewer_id,
+        scheduledDate: localISOString,
+        duration: row.duration_minutes,
+        type: row.interview_type, // ✅ Usar el tipo real de la BD
+        mode: 'IN_PERSON',
+        status: row.status,
+        location: 'Sala de entrevistas',
+        notes: row.notes || '',
+        createdAt: row.created_at.toISOString(),
+        studentName: row.student_name,
+        interviewerName: row.interviewer_name
+      };
+    });
+
+    res.json({
+      success: true,
+      data: formattedInterviews,
+      count: formattedInterviews.length
+    });
+  } catch (error) {
+    console.error('Database error:', error);
+    // Fallback to mock data
+    let filteredInterviews = [...interviews];
+
+    if (applicationId) {
+      filteredInterviews = filteredInterviews.filter(i => i.applicationId === parseInt(applicationId));
+    }
+
+    if (interviewerId) {
+      filteredInterviews = filteredInterviews.filter(i => i.interviewerId === parseInt(interviewerId));
+    }
+
+    if (status) {
+      filteredInterviews = filteredInterviews.filter(i => i.status === status);
+    }
+
+    if (date) {
+      filteredInterviews = filteredInterviews.filter(i => i.scheduledDate.startsWith(date));
+    }
+
+    res.json({
+      success: true,
+      data: filteredInterviews,
+      count: filteredInterviews.length
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// Endpoint específico para calendario - obtener entrevistas por rango de fechas
+app.get('/api/interviews/calendar', async (req, res) => {
+  const { startDate, endDate, interviewerId } = req.query;
+  
+  console.log('📅 Obteniendo entrevistas para calendario:', { startDate, endDate, interviewerId });
+
+  const client = await dbPool.connect();
+  try {
+    let query = `
+      SELECT
+        i.id,
+        i.application_id as "applicationId",
+        i.interviewer_id as "interviewerId",
+        i.scheduled_date as "scheduledDate",
+        EXTRACT(HOUR FROM i.scheduled_date)::text || ':' ||
+        LPAD(EXTRACT(MINUTE FROM i.scheduled_date)::text, 2, '0') as "scheduledTime",
+        i.duration_minutes as duration,
+        i.status,
+        i.notes,
+        i.created_at as "createdAt",
+        i.updated_at as "updatedAt",
+        s.first_name || ' ' || s.paternal_last_name as "studentName",
+        s.paternal_last_name || ' ' || COALESCE(s.maternal_last_name, '') as "parentNames",
+        s.grade_applied as "gradeApplied",
+        u.first_name || ' ' || u.last_name as "interviewerName",
+        'ACADEMIC' as type,
+        'IN_PERSON' as mode,
+        '' as location,
+        '' as "virtualMeetingLink",
+        '' as preparation,
+        null as result,
+        null as score,
+        '' as recommendations,
+        false as "followUpRequired",
+        '' as "followUpNotes",
+        null as "completedAt",
+        CASE
+          WHEN i.scheduled_date > NOW() THEN true
+          ELSE false
+        END as "isUpcoming",
+        CASE
+          WHEN i.scheduled_date < NOW() AND i.status != 'COMPLETED' THEN true
+          ELSE false
+        END as "isOverdue",
+        CASE
+          WHEN i.status = 'SCHEDULED' AND i.scheduled_date <= NOW() THEN true
+          ELSE false
+        END as "canBeCompleted",
+        CASE
+          WHEN i.status IN ('SCHEDULED', 'CONFIRMED') THEN true
+          ELSE false
+        END as "canBeEdited",
+        CASE
+          WHEN i.status IN ('SCHEDULED', 'CONFIRMED') THEN true
+          ELSE false
+        END as "canBeCancelled"
+      FROM interviews i
+      JOIN applications a ON a.id = i.application_id
+      JOIN students s ON s.id = a.student_id
+      JOIN users u ON u.id = i.interviewer_id
+      WHERE 1=1
+    `;
+
+    const params = [];
+    let paramCount = 0;
+
+    // Filtrar por rango de fechas
+    if (startDate) {
+      paramCount++;
+      query += ` AND DATE(i.scheduled_date) >= $${paramCount}`;
+      params.push(startDate);
+    }
+
+    if (endDate) {
+      paramCount++;
+      query += ` AND DATE(i.scheduled_date) <= $${paramCount}`;
+      params.push(endDate);
+    }
+
+    // Filtrar por entrevistador si se especifica
+    if (interviewerId) {
+      paramCount++;
+      query += ` AND i.interviewer_id = $${paramCount}`;
+      params.push(parseInt(interviewerId));
+    }
+
+    query += ` ORDER BY i.scheduled_date ASC`;
+
+    console.log('🔍 Ejecutando query para calendario:', query);
+    console.log('📋 Parámetros:', params);
+
+    const result = await client.query(query, params);
+    const calendarInterviews = result.rows;
+
+    console.log(`📊 Encontradas ${calendarInterviews.length} entrevistas para calendario`);
+
+    res.json(calendarInterviews);
+
+  } catch (error) {
+    console.error('❌ Error obteniendo entrevistas para calendario:', error);
+
+    // Fallback con datos mock para desarrollo
+    console.log('🔄 Usando datos mock de fallback para calendario');
+
+    const mockInterviews = [
+      {
+        id: 1,
+        applicationId: 4,
+        interviewerId: 24,
+        scheduledDate: '2025-09-10',
+        scheduledTime: '10:00',
+        duration: 60,
+        status: 'SCHEDULED',
+        studentName: 'María Elena González',
+        parentNames: 'González Martínez',
+        gradeApplied: 'TERCERO_BASICO',
+        interviewerName: 'María Elena Sánchez Cortés',
+        type: 'ACADEMIC',
+        mode: 'IN_PERSON',
+        location: 'Sala de Reuniones 1',
+        virtualMeetingLink: '',
+        notes: 'Primera entrevista académica',
+        preparation: '',
+        result: null,
+        score: null,
+        recommendations: '',
+        followUpRequired: false,
+        followUpNotes: '',
+        createdAt: '2025-09-05T10:00:00Z',
+        updatedAt: '2025-09-05T10:00:00Z',
+        completedAt: null,
+        isUpcoming: true,
+        isOverdue: false,
+        canBeCompleted: false,
+        canBeEdited: true,
+        canBeCancelled: true
+      },
+      {
+        id: 2,
+        applicationId: 5,
+        interviewerId: 25,
+        scheduledDate: '2025-09-12',
+        scheduledTime: '14:30',
+        duration: 45,
+        status: 'CONFIRMED',
+        studentName: 'Carlos Alberto Rodríguez',
+        parentNames: 'Rodríguez Silva',
+        gradeApplied: 'QUINTO_BASICO',
+        interviewerName: 'Dr. Roberto Andrés Vega Muñoz',
+        type: 'PSYCHOLOGICAL',
+        mode: 'VIRTUAL',
+        location: '',
+        virtualMeetingLink: 'https://meet.google.com/abc-defg-hij',
+        notes: 'Evaluación psicológica',
+        preparation: 'Revisar historial académico',
+        result: null,
+        score: null,
+        recommendations: '',
+        followUpRequired: false,
+        followUpNotes: '',
+        createdAt: '2025-09-05T11:00:00Z',
+        updatedAt: '2025-09-06T09:00:00Z',
+        completedAt: null,
+        isUpcoming: true,
+        isOverdue: false,
+        canBeCompleted: false,
+        canBeEdited: true,
+        canBeCancelled: true
+      },
+      {
+        id: 3,
+        applicationId: 6,
+        interviewerId: 24,
+        scheduledDate: '2025-09-15',
+        scheduledTime: '11:00',
+        duration: 60,
+        status: 'SCHEDULED',
+        studentName: 'Ana Isabel Morales',
+        parentNames: 'Morales Pérez',
+        gradeApplied: 'PRIMERO_BASICO',
+        interviewerName: 'María Elena Sánchez Cortés',
+        type: 'ACADEMIC',
+        mode: 'IN_PERSON',
+        location: 'Sala de Reuniones 2',
+        virtualMeetingLink: '',
+        notes: 'Entrevista de admisión',
+        preparation: '',
+        result: null,
+        score: null,
+        recommendations: '',
+        followUpRequired: false,
+        followUpNotes: '',
+        createdAt: '2025-09-05T12:00:00Z',
+        updatedAt: '2025-09-05T12:00:00Z',
+        completedAt: null,
+        isUpcoming: true,
+        isOverdue: false,
+        canBeCompleted: false,
+        canBeEdited: true,
+        canBeCancelled: true
+      }
+    ];
+
+    // Aplicar filtros a los datos mock
+    let filteredMockInterviews = mockInterviews;
+    
+    if (startDate) {
+      filteredMockInterviews = filteredMockInterviews.filter(interview => 
+        interview.scheduledDate >= startDate
+      );
+    }
+    
+    if (endDate) {
+      filteredMockInterviews = filteredMockInterviews.filter(interview => 
+        interview.scheduledDate <= endDate
+      );
+    }
+    
+    if (interviewerId) {
+      filteredMockInterviews = filteredMockInterviews.filter(interview => 
+        interview.interviewerId === parseInt(interviewerId)
+      );
+    }
+
+    res.json(filteredMockInterviews);
+  } finally {
+    client.release();
+  }
+});
+
+// Endpoint para obtener estadísticas de entrevistas (DEBE IR ANTES que el route parametrizado :id)
+app.get('/api/interviews/statistics', (req, res) => {
+  console.log('📊 Solicitud de estadísticas de entrevistas');
+  
+  // Calcular estadísticas basadas en las entrevistas existentes
+  const totalInterviews = interviews.length;
+  const scheduledInterviews = interviews.filter(i => i.status === 'SCHEDULED').length;
+  const completedInterviews = interviews.filter(i => i.status === 'COMPLETED').length;
+  const cancelledInterviews = interviews.filter(i => i.status === 'CANCELLED').length;
+  
+  // Estadísticas por tipo de entrevista
+  const interviewsByType = {
+    FAMILY: interviews.filter(i => i.type === 'FAMILY').length,
+    PSYCHOLOGICAL: interviews.filter(i => i.type === 'PSYCHOLOGICAL').length,
+    ACADEMIC: interviews.filter(i => i.type === 'ACADEMIC').length,
+    ADMISSION: interviews.filter(i => i.type === 'ADMISSION').length
+  };
+  
+  // Estadísticas por modo de entrevista
+  const interviewsByMode = {
+    IN_PERSON: interviews.filter(i => i.mode === 'IN_PERSON').length,
+    VIRTUAL: interviews.filter(i => i.mode === 'VIRTUAL').length,
+    PHONE: interviews.filter(i => i.mode === 'PHONE').length
+  };
+  
+  // Estadísticas por entrevistador
+  const interviewsByInterviewer = {};
+  interviewers.forEach(interviewer => {
+    const interviewerInterviews = interviews.filter(i => i.interviewerId === interviewer.id);
+    interviewsByInterviewer[interviewer.id] = {
+      name: interviewer.name,
+      role: interviewer.role,
+      totalInterviews: interviewerInterviews.length,
+      scheduled: interviewerInterviews.filter(i => i.status === 'SCHEDULED').length,
+      completed: interviewerInterviews.filter(i => i.status === 'COMPLETED').length,
+      cancelled: interviewerInterviews.filter(i => i.status === 'CANCELLED').length
+    };
+  });
+  
+  // Estadísticas de tiempo promedio (simuladas)
+  const averageDuration = interviews.length > 0 
+    ? Math.round(interviews.reduce((sum, i) => sum + i.duration, 0) / interviews.length)
+    : 60;
+  
+  // Estadísticas por mes (simuladas para el año actual)
+  const currentYear = new Date().getFullYear();
+  const monthlyStats = {};
+  for (let month = 1; month <= 12; month++) {
+    const monthName = new Date(currentYear, month - 1, 1).toLocaleDateString('es-ES', { month: 'long' });
+    // Simular datos mensuales basados en las entrevistas existentes
+    const baseCount = Math.max(0, interviews.length - Math.abs(month - 6)); // Más entrevistas en meses centrales
+    monthlyStats[monthName] = {
+      total: Math.max(0, baseCount + Math.floor(Math.random() * 5)),
+      scheduled: Math.max(0, Math.floor((baseCount * 0.6) + Math.random() * 3)),
+      completed: Math.max(0, Math.floor((baseCount * 0.3) + Math.random() * 2)),
+      cancelled: Math.max(0, Math.floor((baseCount * 0.1) + Math.random() * 1))
+    };
+  }
+  
+  // Horarios más populares (simulado)
+  const popularTimeSlots = [
+    { time: '09:00', count: Math.floor(Math.random() * 10) + 5 },
+    { time: '10:00', count: Math.floor(Math.random() * 15) + 8 },
+    { time: '11:00', count: Math.floor(Math.random() * 12) + 6 },
+    { time: '14:00', count: Math.floor(Math.random() * 8) + 4 },
+    { time: '15:00', count: Math.floor(Math.random() * 10) + 7 },
+    { time: '16:00', count: Math.floor(Math.random() * 6) + 3 }
+  ].sort((a, b) => b.count - a.count);
+  
+  const statistics = {
+    overview: {
+      total: totalInterviews,
+      scheduled: scheduledInterviews,
+      completed: completedInterviews,
+      cancelled: cancelledInterviews,
+      completionRate: totalInterviews > 0 ? ((completedInterviews / totalInterviews) * 100).toFixed(1) : 0,
+      cancellationRate: totalInterviews > 0 ? ((cancelledInterviews / totalInterviews) * 100).toFixed(1) : 0
+    },
+    byType: interviewsByType,
+    byMode: interviewsByMode,
+    byInterviewer: interviewsByInterviewer,
+    timeAnalysis: {
+      averageDuration: averageDuration,
+      popularTimeSlots: popularTimeSlots,
+      peakHours: {
+        morning: popularTimeSlots.filter(slot => slot.time < '12:00').reduce((sum, slot) => sum + slot.count, 0),
+        afternoon: popularTimeSlots.filter(slot => slot.time >= '12:00').reduce((sum, slot) => sum + slot.count, 0)
+      }
+    },
+    monthlyTrends: monthlyStats,
+    performance: {
+      averageInterviewsPerInterviewer: interviewers.length > 0 
+        ? (totalInterviews / interviewers.length).toFixed(1)
+        : 0,
+      mostActiveInterviewer: Object.values(interviewsByInterviewer).reduce((prev, current) => 
+        (prev.totalInterviews > current.totalInterviews) ? prev : current, { name: 'N/A', totalInterviews: 0 }
+      ),
+      utilizationRate: ((totalInterviews / (interviewers.length * 30)) * 100).toFixed(1) // Asumiendo 30 slots disponibles por entrevistador por mes
+    },
+    lastUpdated: new Date().toISOString()
+  };
+  
+  res.json({
+    success: true,
+    data: statistics
+  });
+});
+
+// Endpoint para obtener una entrevista específica
+app.get('/api/interviews/:id', (req, res) => {
+  const interviewId = parseInt(req.params.id);
+  const interview = interviews.find(i => i.id === interviewId);
+
+  if (!interview) {
+    return res.status(404).json({
+      success: false,
+      error: 'Entrevista no encontrada'
+    });
+  }
+
+  res.json({
+    success: true,
+    data: interview
+  });
+});
+
+// Endpoint para actualizar una entrevista
+app.put('/api/interviews/:id', async (req, res) => {
+  const interviewId = parseInt(req.params.id);
+
+  console.log('✏️ Actualizando entrevista:', interviewId, req.body);
+
+  const client = await dbPool.connect();
+  try {
+    // Primero verificar que la entrevista existe en la BD
+    const checkQuery = 'SELECT id FROM interviews WHERE id = $1';
+    const checkResult = await client.query(checkQuery, [interviewId]);
+
+    if (checkResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Entrevista no encontrada'
+      });
+    }
+
+    // Construir la consulta de actualización dinámicamente
+    const updateFields = [];
+    const updateValues = [];
+    let paramCount = 0;
+
+    // Manejar scheduledDate y scheduledTime
+    if (req.body.scheduledDate) {
+      let fullDateTime;
+      if (req.body.scheduledTime) {
+        // Combinar fecha y hora si vienen separadas
+        fullDateTime = `${req.body.scheduledDate}T${req.body.scheduledTime}:00`;
+      } else {
+        fullDateTime = req.body.scheduledDate;
+      }
+
+      const inputDate = new Date(fullDateTime);
+      if (!isNaN(inputDate.getTime())) {
+        // Formatear para PostgreSQL
+        const year = inputDate.getFullYear();
+        const month = String(inputDate.getMonth() + 1).padStart(2, '0');
+        const day = String(inputDate.getDate()).padStart(2, '0');
+        const hours = String(inputDate.getHours()).padStart(2, '0');
+        const minutes = String(inputDate.getMinutes()).padStart(2, '0');
+        const seconds = String(inputDate.getSeconds()).padStart(2, '0');
+        const normalizedDate = `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+
+        paramCount++;
+        updateFields.push(`scheduled_date = $${paramCount}`);
+        updateValues.push(normalizedDate);
+
+        console.log('📅 Actualizando fecha:', {
+          date: req.body.scheduledDate,
+          time: req.body.scheduledTime,
+          combined: fullDateTime,
+          normalized: normalizedDate
+        });
+      }
+    }
+
+    if (req.body.duration) {
+      paramCount++;
+      updateFields.push(`duration_minutes = $${paramCount}`);
+      updateValues.push(req.body.duration);
+    }
+
+    if (req.body.type) {
+      paramCount++;
+      updateFields.push(`interview_type = $${paramCount}`);
+      updateValues.push(req.body.type);
+    }
+
+    if (req.body.status) {
+      paramCount++;
+      updateFields.push(`status = $${paramCount}`);
+      updateValues.push(req.body.status);
+    }
+
+    if (req.body.notes) {
+      paramCount++;
+      updateFields.push(`notes = $${paramCount}`);
+      updateValues.push(req.body.notes);
+    }
+
+    if (req.body.interviewerId) {
+      paramCount++;
+      updateFields.push(`interviewer_id = $${paramCount}`);
+      updateValues.push(req.body.interviewerId);
+    }
+
+    // Agregar updated_at
+    paramCount++;
+    updateFields.push(`updated_at = $${paramCount}`);
+    updateValues.push(new Date());
+
+    // Agregar el ID al final para el WHERE
+    paramCount++;
+    updateValues.push(interviewId);
+
+    if (updateFields.length === 1) { // Solo updated_at
+      return res.status(400).json({
+        success: false,
+        error: 'No hay campos para actualizar'
+      });
+    }
+
+    const updateQuery = `
+      UPDATE interviews
+      SET ${updateFields.join(', ')}
+      WHERE id = $${paramCount}
+      RETURNING *
+    `;
+
+    console.log('📝 Ejecutando actualización:', updateQuery, updateValues);
+    const result = await client.query(updateQuery, updateValues);
+
+    // Formatear fecha en zona horaria local (consistente con GET)
+    const localDate = new Date(result.rows[0].scheduled_date);
+    const year = localDate.getFullYear();
+    const month = String(localDate.getMonth() + 1).padStart(2, '0');
+    const day = String(localDate.getDate()).padStart(2, '0');
+    const hours = String(localDate.getHours()).padStart(2, '0');
+    const minutes = String(localDate.getMinutes()).padStart(2, '0');
+    const seconds = String(localDate.getSeconds()).padStart(2, '0');
+    const localISOString = `${year}-${month}-${day}T${hours}:${minutes}:${seconds}`;
+
+    res.json({
+      success: true,
+      data: {
+        id: result.rows[0].id,
+        applicationId: result.rows[0].application_id,
+        interviewerId: result.rows[0].interviewer_id,
+        scheduledDate: localISOString,
+        duration: result.rows[0].duration_minutes,
+        type: result.rows[0].interview_type,
+        status: result.rows[0].status,
+        notes: result.rows[0].notes || '',
+        updatedAt: result.rows[0].updated_at.toISOString()
+      },
+      message: 'Entrevista actualizada exitosamente'
+    });
+
+  } catch (error) {
+    console.error('❌ Error actualizando entrevista en BD:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error interno del servidor al actualizar la entrevista'
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// Endpoint para cancelar una entrevista
+app.delete('/api/interviews/:id', (req, res) => {
+  const interviewId = parseInt(req.params.id);
+  const interviewIndex = interviews.findIndex(i => i.id === interviewId);
+
+  if (interviewIndex === -1) {
+    return res.status(404).json({
+      success: false,
+      error: 'Entrevista no encontrada'
+    });
+  }
+
+  console.log('❌ Cancelando entrevista:', interviewId);
+
+  // Cambiar estado a cancelado en lugar de eliminar
+  interviews[interviewIndex].status = 'CANCELLED';
+  interviews[interviewIndex].cancelledAt = new Date().toISOString();
+
+  res.json({
+    success: true,
+    message: 'Entrevista cancelada exitosamente'
+  });
+});
+
+// GET interviews by application ID - endpoint específico para obtener entrevistas de una aplicación
+app.get('/api/interviews/application/:applicationId', async (req, res) => {
+  const applicationId = parseInt(req.params.applicationId);
+  
+  console.log('📋 Obteniendo entrevistas para aplicación:', applicationId);
+  
+  if (!applicationId || isNaN(applicationId)) {
+    return res.status(400).json({
+      success: false,
+      error: 'ID de aplicación inválido'
+    });
+  }
+  
+  const client = await dbPool.connect();
+  try {
+    // Buscar entrevistas en la base de datos para esta aplicación
+    const query = `
+      SELECT
+        i.id,
+        i.application_id as "applicationId",
+        i.interviewer_id as "interviewerId",
+        u.first_name || ' ' || u.last_name as "interviewerName",
+        i.scheduled_date as "scheduledDate",
+        i.duration_minutes as duration,
+        i.interview_type as type,
+        i.status,
+        i.notes,
+        i.location,
+        i.created_at as "createdAt",
+        i.updated_at as "updatedAt",
+        'IN_PERSON' as mode,
+        false as "followUpRequired",
+        s.first_name || ' ' || s.paternal_last_name as "studentName",
+        'Padre/Madre' as "parentNames",
+        s.grade_applied as "gradeApplied"
+      FROM interviews i
+      LEFT JOIN users u ON u.id = i.interviewer_id
+      LEFT JOIN applications a ON a.id = i.application_id
+      LEFT JOIN students s ON s.id = a.student_id
+      WHERE i.application_id = $1
+      ORDER BY i.scheduled_date DESC
+    `;
+
+    const result = await client.query(query, [applicationId]);
+    
+    console.log(`✅ Encontradas ${result.rows.length} entrevistas para aplicación ${applicationId}`);
+    
+    // Mapear los datos para que coincidan con la interfaz del frontend
+    const interviews = result.rows.map(row => ({
+      id: row.id,
+      applicationId: row.applicationId,
+      studentName: row.studentName || 'Estudiante desconocido',
+      parentNames: row.parentNames || 'Padre/Madre',
+      gradeApplied: row.gradeApplied || 'Sin especificar',
+      interviewerId: row.interviewerId,
+      interviewerName: row.interviewerName || 'Entrevistador asignado',
+      status: row.status,
+      type: row.type,
+      mode: row.mode,
+      scheduledDate: row.scheduledDate ? row.scheduledDate.toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
+      scheduledTime: row.scheduledDate ? row.scheduledDate.toISOString().split('T')[1].split('.')[0] : '10:00:00',
+      duration: row.duration || 60,
+      location: row.location || 'Sala de entrevistas',
+      notes: row.notes,
+      followUpRequired: row.followUpRequired,
+      createdAt: row.createdAt ? row.createdAt.toISOString() : new Date().toISOString(),
+      updatedAt: row.updatedAt ? row.updatedAt.toISOString() : new Date().toISOString(),
+      isUpcoming: row.status === 'SCHEDULED',
+      isOverdue: false,
+      canBeCompleted: row.status === 'SCHEDULED',
+      canBeEdited: row.status === 'SCHEDULED',
+      canBeCancelled: row.status === 'SCHEDULED'
+    }));
+    
+    res.json(interviews);
+
+  } catch (error) {
+    console.error('❌ Error obteniendo entrevistas por aplicación:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error interno del servidor al obtener las entrevistas',
+      details: error.message
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// [REMOVED - Duplicate statistics route, kept the one at line 449 before parameterized routes]
+
+// GET my evaluations (for professors)
+app.get('/api/evaluations/my-evaluations', async (req, res) => {
+  try {
+    // Extract user ID from Authorization header (JWT token)
+    const authHeader = req.headers.authorization;
+    let evaluatorId = null;
+
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.substring(7);
+      try {
+        // Decode JWT token (mock - in production use proper JWT verification)
+        const base64Payload = token.split('.')[1];
+        const payload = JSON.parse(Buffer.from(base64Payload, 'base64').toString());
+        evaluatorId = payload.userId;
+      } catch (err) {
+        console.error('Error decoding token:', err);
+      }
+    }
+
+    if (!evaluatorId) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    // Get real evaluations from database filtered by evaluator
+    const client = await dbPool.connect();
+    const evaluationsQuery = await client.query(`
+      SELECT
+        e.id,
+        e.application_id,
+        e.status,
+        e.score,
+        e.observations,
+        e.created_at,
+        e.updated_at,
+        s.first_name || ' ' || s.paternal_last_name as student_name,
+        s.grade_applied,
+        u.first_name || ' ' || u.last_name as evaluator_name,
+        u.subject
+      FROM evaluations e
+      JOIN applications a ON a.id = e.application_id
+      JOIN students s ON s.id = a.student_id
+      JOIN users u ON u.id = e.evaluator_id
+      WHERE e.evaluator_id = $1
+      ORDER BY e.created_at DESC
+      LIMIT 20
+    `, [evaluatorId]);
+    client.release();
+
+    const evaluations = evaluationsQuery.rows.map(row => ({
+      id: row.id,
+      applicationId: row.application_id,
+      studentName: row.student_name,
+      grade: row.grade_applied,
+      type: 'ACADEMIC',
+      status: row.status || 'PENDING',
+      assignedAt: row.created_at,
+      completedAt: row.updated_at,
+      dueDate: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(), // 14 days from now
+      subject: row.subject || 'Matemáticas',
+      score: row.score,
+      observations: row.observations
+    }));
+
+    res.json(evaluations);
+  } catch (error) {
+    console.error('Database error:', error);
+    // Fallback to mock data
+    const mockEvaluations = [
+      {
+        id: 1,
+        applicationId: 1,
+        studentName: 'Juan Pérez',
+        grade: '5° Básico',
+        type: 'ACADEMIC',
+        status: 'PENDING',
+        assignedAt: '2025-09-01T10:00:00Z',
+        dueDate: '2025-09-15T23:59:59Z',
+        subject: 'Matemáticas'
+      },
+      {
+        id: 2,
+        applicationId: 2,
+        studentName: 'María González',
+        grade: '6° Básico',
+        type: 'ACADEMIC',
+        status: 'COMPLETED',
+        assignedAt: '2025-08-25T10:00:00Z',
+        completedAt: '2025-09-02T14:30:00Z',
+        dueDate: '2025-09-10T23:59:59Z',
+        subject: 'Matemáticas',
+        score: 85,
+        observations: 'Excelente desempeño en resolución de problemas'
+      }
+    ];
+    res.json(mockEvaluations);
+  }
+});
+
+// ==================================================
+// INTERVIEWER SCHEDULE MANAGEMENT ENDPOINTS
+// ==================================================
+
+// Get schedules for an interviewer by year
+app.get('/api/interviewer-schedules/interviewer/:interviewerId/year/:year', async (req, res) => {
+  const client = await dbPool.connect();
+  try {
+    const { interviewerId, year } = req.params;
+    console.log(`📅 Getting schedules for interviewer ${interviewerId} in year ${year}`);
+
+    const query = `
+      SELECT
+        s.id,
+        s.interviewer_id,
+        s.day_of_week,
+        s.start_time,
+        s.end_time,
+        s.year,
+        s.schedule_type,
+        s.is_active,
+        s.notes,
+        s.created_at,
+        s.updated_at,
+        u.first_name,
+        u.last_name,
+        u.email,
+        u.role
+      FROM interviewer_schedules s
+      JOIN users u ON u.id = s.interviewer_id
+      WHERE s.interviewer_id = $1 AND s.year = $2 AND s.is_active = true
+      ORDER BY
+        CASE s.day_of_week
+          WHEN 'MONDAY' THEN 1
+          WHEN 'TUESDAY' THEN 2
+          WHEN 'WEDNESDAY' THEN 3
+          WHEN 'THURSDAY' THEN 4
+          WHEN 'FRIDAY' THEN 5
+          WHEN 'SATURDAY' THEN 6
+          WHEN 'SUNDAY' THEN 7
+        END,
+        s.start_time
+    `;
+
+    const result = await client.query(query, [interviewerId, year]);
+
+    const schedules = result.rows.map(row => ({
+      id: row.id,
+      interviewer: {
+        id: row.interviewer_id,
+        firstName: row.first_name,
+        lastName: row.last_name,
+        email: row.email,
+        role: row.role
+      },
+      dayOfWeek: row.day_of_week,
+      startTime: row.start_time,
+      endTime: row.end_time,
+      year: row.year,
+      scheduleType: row.schedule_type,
+      isActive: row.is_active,
+      notes: row.notes,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }));
+
+    console.log(`✅ Found ${schedules.length} schedules for interviewer ${interviewerId}`);
+    res.json(schedules);
+
+  } catch (error) {
+    console.error('❌ Error getting interviewer schedules:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+// Create a new schedule
+app.post('/api/interviewer-schedules', async (req, res) => {
+  const client = await dbPool.connect();
+  try {
+    const { interviewer, dayOfWeek, startTime, endTime, year, scheduleType, isActive, notes } = req.body;
+
+    console.log(`📝 Creating new schedule for interviewer ${interviewer.id}:`, {
+      dayOfWeek, startTime, endTime, year, scheduleType, isActive
+    });
+
+    const query = `
+      INSERT INTO interviewer_schedules
+      (interviewer_id, day_of_week, start_time, end_time, year, schedule_type, is_active, notes, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+      RETURNING *
+    `;
+
+    const result = await client.query(query, [
+      interviewer.id,
+      dayOfWeek,
+      startTime,
+      endTime,
+      year,
+      scheduleType || 'RECURRING',
+      isActive !== undefined ? isActive : true,
+      notes || ''
+    ]);
+
+    const newSchedule = {
+      id: result.rows[0].id,
+      interviewer: {
+        id: interviewer.id,
+        firstName: interviewer.firstName,
+        lastName: interviewer.lastName,
+        email: interviewer.email,
+        role: interviewer.role
+      },
+      dayOfWeek: result.rows[0].day_of_week,
+      startTime: result.rows[0].start_time,
+      endTime: result.rows[0].end_time,
+      year: result.rows[0].year,
+      scheduleType: result.rows[0].schedule_type,
+      isActive: result.rows[0].is_active,
+      notes: result.rows[0].notes,
+      createdAt: result.rows[0].created_at,
+      updatedAt: result.rows[0].updated_at
+    };
+
+    console.log(`✅ Schedule created with ID ${newSchedule.id}`);
+    res.status(201).json(newSchedule);
+
+  } catch (error) {
+    console.error('❌ Error creating schedule:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+// Update an existing schedule
+app.put('/api/interviewer-schedules/:scheduleId', async (req, res) => {
+  const client = await dbPool.connect();
+  try {
+    const { scheduleId } = req.params;
+    const { dayOfWeek, startTime, endTime, scheduleType, isActive, notes } = req.body;
+
+    console.log(`📝 Updating schedule ${scheduleId}:`, {
+      dayOfWeek, startTime, endTime, scheduleType, isActive
+    });
+
+    const query = `
+      UPDATE interviewer_schedules
+      SET day_of_week = $1, start_time = $2, end_time = $3,
+          schedule_type = $4, is_active = $5, notes = $6, updated_at = NOW()
+      WHERE id = $7
+      RETURNING *
+    `;
+
+    const result = await client.query(query, [
+      dayOfWeek, startTime, endTime, scheduleType, isActive, notes || '', scheduleId
+    ]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Schedule not found' });
+    }
+
+    // Get interviewer details
+    const interviewerQuery = `
+      SELECT first_name, last_name, email, role
+      FROM users
+      WHERE id = $1
+    `;
+    const interviewerResult = await client.query(interviewerQuery, [result.rows[0].interviewer_id]);
+
+    const updatedSchedule = {
+      id: result.rows[0].id,
+      interviewer: {
+        id: result.rows[0].interviewer_id,
+        firstName: interviewerResult.rows[0].first_name,
+        lastName: interviewerResult.rows[0].last_name,
+        email: interviewerResult.rows[0].email,
+        role: interviewerResult.rows[0].role
+      },
+      dayOfWeek: result.rows[0].day_of_week,
+      startTime: result.rows[0].start_time,
+      endTime: result.rows[0].end_time,
+      year: result.rows[0].year,
+      scheduleType: result.rows[0].schedule_type,
+      isActive: result.rows[0].is_active,
+      notes: result.rows[0].notes,
+      createdAt: result.rows[0].created_at,
+      updatedAt: result.rows[0].updated_at
+    };
+
+    console.log(`✅ Schedule ${scheduleId} updated successfully`);
+    res.json(updatedSchedule);
+
+  } catch (error) {
+    console.error('❌ Error updating schedule:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+// Delete a schedule
+app.delete('/api/interviewer-schedules/:scheduleId', async (req, res) => {
+  const client = await dbPool.connect();
+  try {
+    const { scheduleId } = req.params;
+
+    console.log(`🗑️ Deleting schedule ${scheduleId}`);
+
+    const query = 'DELETE FROM interviewer_schedules WHERE id = $1';
+    const result = await client.query(query, [scheduleId]);
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Schedule not found' });
+    }
+
+    console.log(`✅ Schedule ${scheduleId} deleted successfully`);
+    res.status(204).send();
+
+  } catch (error) {
+    console.error('❌ Error deleting schedule:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+// Get all schedules for an interviewer
+app.get('/api/interviewer-schedules/interviewer/:interviewerId', async (req, res) => {
+  const client = await dbPool.connect();
+  try {
+    const { interviewerId } = req.params;
+    const currentYear = new Date().getFullYear();
+
+    console.log(`📅 Getting all schedules for interviewer ${interviewerId}`);
+
+    const query = `
+      SELECT
+        s.id,
+        s.interviewer_id,
+        s.day_of_week,
+        s.start_time,
+        s.end_time,
+        s.year,
+        s.schedule_type,
+        s.is_active,
+        s.notes,
+        s.created_at,
+        s.updated_at,
+        u.first_name,
+        u.last_name,
+        u.email,
+        u.role
+      FROM interviewer_schedules s
+      JOIN users u ON u.id = s.interviewer_id
+      WHERE s.interviewer_id = $1 AND s.year = $2
+      ORDER BY
+        CASE s.day_of_week
+          WHEN 'MONDAY' THEN 1
+          WHEN 'TUESDAY' THEN 2
+          WHEN 'WEDNESDAY' THEN 3
+          WHEN 'THURSDAY' THEN 4
+          WHEN 'FRIDAY' THEN 5
+          WHEN 'SATURDAY' THEN 6
+          WHEN 'SUNDAY' THEN 7
+        END,
+        s.start_time
+    `;
+
+    const result = await client.query(query, [interviewerId, currentYear]);
+
+    const schedules = result.rows.map(row => ({
+      id: row.id,
+      interviewer: {
+        id: row.interviewer_id,
+        firstName: row.first_name,
+        lastName: row.last_name,
+        email: row.email,
+        role: row.role
+      },
+      dayOfWeek: row.day_of_week,
+      startTime: row.start_time,
+      endTime: row.end_time,
+      year: row.year,
+      scheduleType: row.schedule_type,
+      isActive: row.is_active,
+      notes: row.notes,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }));
+
+    console.log(`✅ Found ${schedules.length} schedules for interviewer ${interviewerId}`);
+    res.json(schedules);
+
+  } catch (error) {
+    console.error('❌ Error getting interviewer schedules:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+// =================================================================
+// COMPREHENSIVE AVAILABILITY AND INTERVIEW MANAGEMENT ENDPOINTS
+// =================================================================
+
+// Helper function to check if a time is within a time range
+function isTimeInRange(targetTime, startTime, endTime) {
+  // Convert all to minutes for comparison
+  const timeToMinutes = (time) => {
+    const [hours, minutes] = time.split(':').map(Number);
+    return hours * 60 + minutes;
+  };
+
+  const target = timeToMinutes(targetTime);
+  const start = timeToMinutes(startTime);
+  const end = timeToMinutes(endTime);
+
+  return target >= start && target < end;
+}
+
+// Helper function to get day of week from date
+function getDayOfWeek(dateString) {
+  const days = ['SUNDAY', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY'];
+  const date = new Date(dateString);
+  return days[date.getDay()];
+}
+
+// Check real interviewer availability based on configured schedules and existing interviews
+app.get('/api/interviews/availability/check', async (req, res) => {
+  const { date, time, duration = 60, interviewType } = req.query;
+
+  console.log('🔍 Checking availability:', { date, time, duration, interviewType });
+
+  if (!date || !time) {
+    return res.status(400).json({
+      success: false,
+      error: 'Date and time are required parameters'
+    });
+  }
+
+  const client = await dbPool.connect();
+  try {
+    const dayOfWeek = getDayOfWeek(date);
+    const currentYear = new Date().getFullYear();
+
+    console.log(`📅 Looking for ${dayOfWeek} schedules at ${time} for year ${currentYear}`);
+
+    // Step 1: Find all interviewers with matching schedules for the day/time
+    const scheduleQuery = `
+      SELECT DISTINCT
+        s.interviewer_id,
+        u.first_name,
+        u.last_name,
+        u.email,
+        u.role,
+        u.educational_level,
+        u.subject,
+        s.start_time,
+        s.end_time,
+        s.day_of_week
+      FROM interviewer_schedules s
+      JOIN users u ON u.id = s.interviewer_id
+      WHERE s.day_of_week = $1
+        AND s.year = $2
+        AND s.is_active = true
+        AND s.schedule_type = 'RECURRING'
+        AND u.role IN ('TEACHER', 'COORDINATOR', 'PSYCHOLOGIST', 'CYCLE_DIRECTOR')
+    `;
+
+    const scheduleResult = await queryWithCircuitBreaker.fire(client, scheduleQuery, [dayOfWeek, currentYear]);
+    console.log(`📋 Found ${scheduleResult.rows.length} interviewer schedules for ${dayOfWeek}`);
+
+    // Step 2: Filter by time availability
+    const availableInterviewers = scheduleResult.rows.filter(row => {
+      const isInTimeRange = isTimeInRange(time, row.start_time, row.end_time);
+      console.log(`⏰ ${row.first_name} ${row.last_name}: ${row.start_time}-${row.end_time}, ${time} in range? ${isInTimeRange}`);
+      return isInTimeRange;
+    });
+
+    console.log(`✅ ${availableInterviewers.length} interviewers available at ${time}`);
+
+    // Step 3: Check for conflicts with existing interviews
+    const conflictQuery = `
+      SELECT interviewer_id, scheduled_date, duration_minutes
+      FROM interviews
+      WHERE DATE(scheduled_date) = $1
+        AND status NOT IN ('CANCELLED', 'NO_SHOW')
+        AND interviewer_id = ANY($2)
+    `;
+
+    const interviewerIds = availableInterviewers.map(i => i.interviewer_id);
+
+    let finalAvailable = availableInterviewers;
+
+    if (interviewerIds.length > 0) {
+      const conflictResult = await queryWithCircuitBreaker.fire(client, conflictQuery, [date, interviewerIds]);
+
+      console.log(`📊 Found ${conflictResult.rows.length} existing interviews on ${date}`);
+
+      // Filter out interviewers with time conflicts
+      finalAvailable = availableInterviewers.filter(interviewer => {
+        const conflicts = conflictResult.rows.filter(interview =>
+          interview.interviewer_id === interviewer.interviewer_id
+        );
+
+        for (const conflict of conflicts) {
+          const conflictDate = new Date(conflict.scheduled_date);
+          const conflictStart = conflictDate.getHours() * 60 + conflictDate.getMinutes();
+          const conflictEnd = conflictStart + conflict.duration_minutes;
+
+          const [requestHour, requestMinute] = time.split(':').map(Number);
+          const requestStart = requestHour * 60 + requestMinute;
+          const requestEnd = requestStart + parseInt(duration);
+
+          // Check for overlap
+          if (requestStart < conflictEnd && requestEnd > conflictStart) {
+            console.log(`❌ Conflict for ${interviewer.first_name}: existing ${conflictStart}-${conflictEnd}, requested ${requestStart}-${requestEnd}`);
+            return false;
+          }
+        }
+        return true;
+      });
+    }
+
+    // Step 4: Filter by interview type if specified
+    if (interviewType) {
+      const typeMapping = {
+        'PSYCHOLOGICAL': ['PSYCHOLOGIST'],
+        'ACADEMIC': ['TEACHER', 'COORDINATOR', 'CYCLE_DIRECTOR'],
+        'INDIVIDUAL': ['TEACHER', 'COORDINATOR', 'PSYCHOLOGIST', 'CYCLE_DIRECTOR'],
+        'FAMILY': ['COORDINATOR', 'PSYCHOLOGIST', 'CYCLE_DIRECTOR'],
+        'BEHAVIORAL': ['PSYCHOLOGIST', 'CYCLE_DIRECTOR']
+      };
+
+      const allowedRoles = typeMapping[interviewType] || ['TEACHER', 'COORDINATOR', 'PSYCHOLOGIST', 'CYCLE_DIRECTOR'];
+      finalAvailable = finalAvailable.filter(interviewer =>
+        allowedRoles.includes(interviewer.role)
+      );
+    }
+
+    console.log(`🎯 Final available interviewers: ${finalAvailable.length}`);
+
+    const responseData = {
+      date,
+      time,
+      duration: parseInt(duration),
+      interviewType: interviewType || 'ANY',
+      availableInterviewers: finalAvailable.map(interviewer => ({
+        id: interviewer.interviewer_id,
+        name: `${interviewer.first_name} ${interviewer.last_name}`,
+        firstName: interviewer.first_name,
+        lastName: interviewer.last_name,
+        email: interviewer.email,
+        role: interviewer.role,
+        educationalLevel: interviewer.educational_level,
+        subject: interviewer.subject,
+        availableFrom: interviewer.start_time,
+        availableUntil: interviewer.end_time
+      })),
+      count: finalAvailable.length,
+      message: finalAvailable.length > 0
+        ? `${finalAvailable.length} entrevistadores disponibles`
+        : 'No hay entrevistadores disponibles en este horario'
+    };
+
+    res.json({
+      success: true,
+      data: responseData
+    });
+
+  } catch (error) {
+    console.error('❌ Error checking availability:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error checking availability',
+      details: error.message
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// Get complete student details with all 4 interviews
+app.get('/api/interviews/student/:applicationId/complete', async (req, res) => {
+  const { applicationId } = req.params;
+
+  console.log('📋 Getting complete student details for application:', applicationId);
+
+  const client = await dbPool.connect();
+  try {
+    // Get application with student details
+    const applicationQuery = `
+      SELECT
+        a.id as application_id,
+        a.status as application_status,
+        a.submission_date,
+        a.application_year,
+        s.id as student_id,
+        s.first_name,
+        s.paternal_last_name,
+        s.maternal_last_name,
+        s.rut,
+        s.birth_date,
+        s.grade_applied,
+        s.school_applied,
+        s.current_school,
+        s.email as student_email,
+        s.address
+      FROM applications a
+      JOIN students s ON s.id = a.student_id
+      WHERE a.id = $1
+    `;
+
+    const applicationResult = await client.query(applicationQuery, [applicationId]);
+
+    if (applicationResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Application not found'
+      });
+    }
+
+    const application = applicationResult.rows[0];
+
+    // Get all interviews for this application
+    const interviewsQuery = `
+      SELECT
+        i.id,
+        i.interview_type,
+        i.status,
+        i.scheduled_date,
+        i.duration_minutes,
+        i.location,
+        i.notes,
+        i.interview_mode,
+        i.meeting_link,
+        i.room,
+        i.follow_up_required,
+        u.first_name as interviewer_first_name,
+        u.last_name as interviewer_last_name,
+        u.email as interviewer_email,
+        u.role as interviewer_role
+      FROM interviews i
+      JOIN users u ON u.id = i.interviewer_id
+      WHERE i.application_id = $1
+      ORDER BY i.scheduled_date
+    `;
+
+    const interviewsResult = await client.query(interviewsQuery, [applicationId]);
+
+    // Define required interview types
+    const requiredInterviewTypes = ['INDIVIDUAL', 'FAMILY', 'PSYCHOLOGICAL', 'ACADEMIC'];
+
+    const interviews = interviewsResult.rows.map(row => ({
+      id: row.id,
+      type: row.interview_type,
+      status: row.status,
+      scheduledDate: row.scheduled_date,
+      duration: row.duration_minutes,
+      location: row.location,
+      mode: row.interview_mode,
+      meetingLink: row.meeting_link,
+      room: row.room,
+      notes: row.notes,
+      followUpRequired: row.follow_up_required,
+      interviewer: {
+        name: `${row.interviewer_first_name} ${row.interviewer_last_name}`,
+        email: row.interviewer_email,
+        role: row.interviewer_role
+      }
+    }));
+
+    // Check which interview types are missing
+    const existingTypes = interviews.map(i => i.type);
+    const missingTypes = requiredInterviewTypes.filter(type => !existingTypes.includes(type));
+
+    const studentDetails = {
+      applicationId: application.application_id,
+      applicationStatus: application.application_status,
+      submissionDate: application.submission_date,
+      applicationYear: application.application_year,
+      student: {
+        id: application.student_id,
+        firstName: application.first_name,
+        lastName: `${application.paternal_last_name} ${application.maternal_last_name}`,
+        fullName: `${application.first_name} ${application.paternal_last_name} ${application.maternal_last_name}`,
+        rut: application.rut,
+        birthDate: application.birth_date,
+        gradeApplied: application.grade_applied,
+        schoolApplied: application.school_applied,
+        currentSchool: application.current_school,
+        email: application.student_email,
+        address: application.address
+      },
+      interviews: {
+        completed: interviews,
+        missing: missingTypes,
+        total: interviews.length,
+        required: requiredInterviewTypes.length,
+        isComplete: missingTypes.length === 0
+      },
+      interviewProgress: {
+        individual: interviews.find(i => i.type === 'INDIVIDUAL') || null,
+        family: interviews.find(i => i.type === 'FAMILY') || null,
+        psychological: interviews.find(i => i.type === 'PSYCHOLOGICAL') || null,
+        academic: interviews.find(i => i.type === 'ACADEMIC') || null
+      }
+    };
+
+    console.log(`✅ Student details: ${interviews.length}/4 interviews completed`);
+
+    res.json({
+      success: true,
+      data: studentDetails
+    });
+
+  } catch (error) {
+    console.error('❌ Error getting student details:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error getting student details',
+      details: error.message
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// Get enum metadata for dropdowns
+app.get('/api/interviews/metadata/enums', (req, res) => {
+  // Check cache first
+  const cacheKey = 'interviews:metadata:enums';
+  const cached = evaluationCache.get(cacheKey);
+  if (cached) {
+    console.log('[Cache HIT] interviews:metadata:enums');
+    return res.json(cached);
+  }
+  console.log('[Cache MISS] interviews:metadata:enums');
+
+  const enums = {
+    interviewTypes: [
+      { value: 'INDIVIDUAL', label: 'Entrevista Individual', description: 'Entrevista con el estudiante' },
+      { value: 'FAMILY', label: 'Entrevista Familiar', description: 'Entrevista con la familia' },
+      { value: 'PSYCHOLOGICAL', label: 'Evaluación Psicológica', description: 'Evaluación psicológica del estudiante' },
+      { value: 'ACADEMIC', label: 'Evaluación Académica', description: 'Evaluación académica y de conocimientos' },
+      { value: 'BEHAVIORAL', label: 'Evaluación Conductual', description: 'Evaluación de comportamiento y adaptación' }
+    ],
+    interviewModes: [
+      { value: 'PRESENTIAL', label: 'Presencial', description: 'Entrevista en las instalaciones del colegio' },
+      { value: 'VIRTUAL', label: 'Virtual', description: 'Entrevista por videoconferencia' },
+      { value: 'HYBRID', label: 'Híbrida', description: 'Combinación de presencial y virtual' }
+    ],
+    interviewStatuses: [
+      { value: 'SCHEDULED', label: 'Agendada', description: 'Entrevista programada' },
+      { value: 'CONFIRMED', label: 'Confirmada', description: 'Entrevista confirmada por el entrevistador' },
+      { value: 'IN_PROGRESS', label: 'En Progreso', description: 'Entrevista en desarrollo' },
+      { value: 'COMPLETED', label: 'Completada', description: 'Entrevista finalizada' },
+      { value: 'CANCELLED', label: 'Cancelada', description: 'Entrevista cancelada' },
+      { value: 'NO_SHOW', label: 'No se presentó', description: 'El entrevistado no asistió' },
+      { value: 'RESCHEDULED', label: 'Reprogramada', description: 'Entrevista reprogramada' }
+    ],
+    userRoles: [
+      { value: 'TEACHER', label: 'Profesor', canInterview: ['INDIVIDUAL', 'ACADEMIC'] },
+      { value: 'COORDINATOR', label: 'Coordinador', canInterview: ['INDIVIDUAL', 'FAMILY', 'ACADEMIC'] },
+      { value: 'PSYCHOLOGIST', label: 'Psicólogo', canInterview: ['INDIVIDUAL', 'FAMILY', 'PSYCHOLOGICAL', 'BEHAVIORAL'] },
+      { value: 'CYCLE_DIRECTOR', label: 'Director de Ciclo', canInterview: ['INDIVIDUAL', 'FAMILY', 'ACADEMIC', 'BEHAVIORAL'] }
+    ]
+  };
+
+  const response = {
+    success: true,
+    data: enums
+  };
+
+  // Cache for 60 minutes (metadata is static)
+  evaluationCache.set(cacheKey, response, 3600000);
+  res.json(response);
+});
+
+// Validate interview creation business rules
+app.post('/api/interviews/validate', async (req, res) => {
+  const { applicationId, interviewType, interviewerId, scheduledDate, scheduledTime, duration = 60 } = req.body;
+
+  console.log('🔍 Validating interview creation:', req.body);
+
+  const client = await dbPool.connect();
+  try {
+    const errors = [];
+    const warnings = [];
+
+    // 1. Check if application exists
+    const appQuery = 'SELECT id, status FROM applications WHERE id = $1';
+    const appResult = await queryWithCircuitBreaker.fire(client, appQuery, [applicationId]);
+
+    if (appResult.rows.length === 0) {
+      errors.push('La aplicación no existe');
+    } else {
+      const appStatus = appResult.rows[0].status;
+      if (!['PENDING', 'UNDER_REVIEW', 'INTERVIEW_SCHEDULED'].includes(appStatus)) {
+        warnings.push(`La aplicación está en estado ${appStatus}`);
+      }
+    }
+
+    // 2. Check if interviewer exists and has the right role
+    const interviewerQuery = 'SELECT id, role, first_name, last_name FROM users WHERE id = $1';
+    const interviewerResult = await queryWithCircuitBreaker.fire(client, interviewerQuery, [interviewerId]);
+
+    if (interviewerResult.rows.length === 0) {
+      errors.push('El entrevistador no existe');
+    } else {
+      const interviewer = interviewerResult.rows[0];
+      const validRoles = {
+        'INDIVIDUAL': ['TEACHER', 'COORDINATOR', 'PSYCHOLOGIST', 'CYCLE_DIRECTOR'],
+        'FAMILY': ['COORDINATOR', 'PSYCHOLOGIST', 'CYCLE_DIRECTOR'],
+        'PSYCHOLOGICAL': ['PSYCHOLOGIST'],
+        'ACADEMIC': ['TEACHER', 'COORDINATOR', 'CYCLE_DIRECTOR'],
+        'BEHAVIORAL': ['PSYCHOLOGIST', 'CYCLE_DIRECTOR']
+      };
+
+      if (!validRoles[interviewType]?.includes(interviewer.role)) {
+        errors.push(`${interviewer.first_name} ${interviewer.last_name} (${interviewer.role}) no puede realizar entrevistas de tipo ${interviewType}`);
+      }
+    }
+
+    // 3. Check for duplicate interview types
+    const duplicateQuery = 'SELECT id FROM interviews WHERE application_id = $1 AND interview_type = $2 AND status NOT IN (\'CANCELLED\', \'NO_SHOW\')';
+    const duplicateResult = await queryWithCircuitBreaker.fire(client, duplicateQuery, [applicationId, interviewType]);
+
+    if (duplicateResult.rows.length > 0) {
+      errors.push(`Ya existe una entrevista de tipo ${interviewType} para esta aplicación`);
+    }
+
+    // 4. Check interviewer availability
+    const fullDateTime = `${scheduledDate}T${scheduledTime}:00`;
+    const interviewDate = new Date(fullDateTime);
+    const dayOfWeek = getDayOfWeek(scheduledDate);
+
+    // Check schedule availability
+    const scheduleQuery = `
+      SELECT * FROM interviewer_schedules
+      WHERE interviewer_id = $1
+        AND day_of_week = $2
+        AND year = $3
+        AND is_active = true
+        AND schedule_type = 'RECURRING'
+    `;
+
+    const currentYear = new Date().getFullYear();
+    const scheduleResult = await queryWithCircuitBreaker.fire(client, scheduleQuery, [interviewerId, dayOfWeek, currentYear]);
+
+    if (scheduleResult.rows.length === 0) {
+      errors.push(`El entrevistador no tiene horarios configurados para ${dayOfWeek.toLowerCase()}`);
+    } else {
+      const schedule = scheduleResult.rows[0];
+      if (!isTimeInRange(scheduledTime, schedule.start_time, schedule.end_time)) {
+        errors.push(`El horario ${scheduledTime} está fuera del rango disponible (${schedule.start_time} - ${schedule.end_time})`);
+      }
+    }
+
+    // 5. Check for time conflicts
+    const conflictQuery = `
+      SELECT id, scheduled_date, duration_minutes FROM interviews
+      WHERE interviewer_id = $1
+        AND DATE(scheduled_date) = $2
+        AND status NOT IN ('CANCELLED', 'NO_SHOW')
+    `;
+
+    const conflictResult = await queryWithCircuitBreaker.fire(client, conflictQuery, [interviewerId, scheduledDate]);
+
+    for (const conflict of conflictResult.rows) {
+      const conflictDate = new Date(conflict.scheduled_date);
+      const conflictStart = conflictDate.getHours() * 60 + conflictDate.getMinutes();
+      const conflictEnd = conflictStart + conflict.duration_minutes;
+
+      const [requestHour, requestMinute] = scheduledTime.split(':').map(Number);
+      const requestStart = requestHour * 60 + requestMinute;
+      const requestEnd = requestStart + parseInt(duration);
+
+      if (requestStart < conflictEnd && requestEnd > conflictStart) {
+        const conflictTime = conflictDate.toTimeString().substring(0, 5);
+        errors.push(`Conflicto de horario: ya existe una entrevista a las ${conflictTime}`);
+      }
+    }
+
+    // 6. Check 4-interview limit
+    const countQuery = 'SELECT COUNT(*) as count FROM interviews WHERE application_id = $1 AND status NOT IN (\'CANCELLED\', \'NO_SHOW\')';
+    const countResult = await client.query(countQuery, [applicationId]);
+    const interviewCount = parseInt(countResult.rows[0].count);
+
+    if (interviewCount >= 4) {
+      errors.push('Ya se han programado las 4 entrevistas requeridas para esta aplicación');
+    } else if (interviewCount === 3) {
+      warnings.push('Esta será la cuarta y última entrevista para esta aplicación');
+    }
+
+    const isValid = errors.length === 0;
+
+    res.json({
+      success: true,
+      data: {
+        valid: isValid,
+        errors,
+        warnings,
+        interviewCount: interviewCount + (isValid ? 1 : 0),
+        remainingInterviews: Math.max(0, 4 - interviewCount - (isValid ? 1 : 0))
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error validating interview:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error validating interview',
+      details: error.message
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// Enhanced interview creation with full validation
+app.post('/api/interviews/create-validated', async (req, res) => {
+  const {
+    applicationId,
+    interviewerId,
+    scheduledDate,
+    scheduledTime,
+    duration = 60,
+    interviewType,
+    interviewMode = 'PRESENTIAL',
+    location,
+    meetingLink,
+    room,
+    notes
+  } = req.body;
+
+  console.log('🎯 Creating validated interview:', req.body);
+
+  const client = await dbPool.connect();
+  try {
+    // First validate using the validation endpoint logic
+    const validation = await fetch(`http://localhost:${port}/api/interviews/validate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body)
+    });
+
+    if (!validation.ok) {
+      throw new Error('Validation service error');
+    }
+
+    const validationResult = await validation.json();
+
+    if (!validationResult.data.valid) {
+      return res.status(400).json({
+        success: false,
+        error: 'Validation failed',
+        details: validationResult.data.errors,
+        warnings: validationResult.data.warnings
+      });
+    }
+
+    // If validation passes, create the interview
+    const fullDateTime = `${scheduledDate}T${scheduledTime}:00`;
+    const inputDate = new Date(fullDateTime);
+
+    // Format for PostgreSQL
+    const year = inputDate.getFullYear();
+    const month = String(inputDate.getMonth() + 1).padStart(2, '0');
+    const day = String(inputDate.getDate()).padStart(2, '0');
+    const hours = String(inputDate.getHours()).padStart(2, '0');
+    const minutes = String(inputDate.getMinutes()).padStart(2, '0');
+    const seconds = String(inputDate.getSeconds()).padStart(2, '0');
+    const normalizedDate = `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+
+    const insertQuery = `
+      INSERT INTO interviews (
+        application_id,
+        interviewer_id,
+        scheduled_date,
+        duration_minutes,
+        interview_type,
+        interview_mode,
+        status,
+        location,
+        meeting_link,
+        room,
+        notes,
+        created_at,
+        updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
+      RETURNING *
+    `;
+
+    const values = [
+      parseInt(applicationId),
+      parseInt(interviewerId),
+      normalizedDate,
+      parseInt(duration),
+      interviewType,
+      interviewMode,
+      'SCHEDULED',
+      location || 'Por asignar',
+      meetingLink || null,
+      room || null,
+      notes || ''
+    ];
+
+    const result = await client.query(insertQuery, values);
+    const newInterview = result.rows[0];
+
+    console.log('✅ Interview created with validation:', newInterview.id);
+
+    res.status(201).json({
+      success: true,
+      data: {
+        interview: newInterview,
+        validation: validationResult.data,
+        message: 'Entrevista creada exitosamente con todas las validaciones'
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error creating validated interview:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error creating interview',
+      details: error.message
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// ===================================
+// EVALUATION MANAGEMENT ENDPOINTS
+// ===================================
+
+// Mock data for evaluators by role
+const mockEvaluatorsByRole = {
+  TEACHER_LANGUAGE: [
+    { id: 1, firstName: 'Ana', lastName: 'García', email: 'ana.garcia@mtn.cl', role: 'TEACHER_LANGUAGE', active: true },
+    { id: 2, firstName: 'Carlos', lastName: 'López', email: 'carlos.lopez@mtn.cl', role: 'TEACHER_LANGUAGE', active: true }
+  ],
+  TEACHER_MATHEMATICS: [
+    { id: 3, firstName: 'María', lastName: 'Rodríguez', email: 'maria.rodriguez@mtn.cl', role: 'TEACHER_MATHEMATICS', active: true },
+    { id: 4, firstName: 'Pedro', lastName: 'Martínez', email: 'pedro.martinez@mtn.cl', role: 'TEACHER_MATHEMATICS', active: true }
+  ],
+  TEACHER_ENGLISH: [
+    { id: 5, firstName: 'Susan', lastName: 'Johnson', email: 'susan.johnson@mtn.cl', role: 'TEACHER_ENGLISH', active: true },
+    { id: 6, firstName: 'David', lastName: 'Smith', email: 'david.smith@mtn.cl', role: 'TEACHER_ENGLISH', active: true }
+  ],
+  CYCLE_DIRECTOR: [
+    { id: 7, firstName: 'Carmen', lastName: 'Pérez', email: 'carmen.perez@mtn.cl', role: 'CYCLE_DIRECTOR', active: true },
+    { id: 8, firstName: 'Luis', lastName: 'González', email: 'luis.gonzalez@mtn.cl', role: 'CYCLE_DIRECTOR', active: true }
+  ],
+  PSYCHOLOGIST: [
+    { id: 9, firstName: 'Patricia', lastName: 'Silva', email: 'patricia.silva@mtn.cl', role: 'PSYCHOLOGIST', active: true },
+    { id: 10, firstName: 'Roberto', lastName: 'Torres', email: 'roberto.torres@mtn.cl', role: 'PSYCHOLOGIST', active: true }
+  ]
+};
+
+// Mock evaluations data
+const mockEvaluations = [
+  {
+    id: 1,
+    evaluationType: 'LANGUAGE_EXAM',
+    status: 'PENDING',
+    applicationId: 1,
+    evaluatorId: 1,
+    createdAt: '2024-01-15T10:00:00Z',
+    evaluator: mockEvaluatorsByRole.TEACHER_LANGUAGE[0]
+  },
+  {
+    id: 2,
+    evaluationType: 'MATHEMATICS_EXAM',
+    status: 'COMPLETED',
+    score: 85,
+    grade: 'B',
+    applicationId: 1,
+    evaluatorId: 3,
+    createdAt: '2024-01-15T10:00:00Z',
+    completionDate: '2024-01-20T14:30:00Z',
+    evaluator: mockEvaluatorsByRole.TEACHER_MATHEMATICS[0]
+  }
+];
+
+// Get evaluators by role - AHORA USA DATOS REALES
+app.get('/api/evaluations/evaluators/:role', async (req, res) => {
+  const { role } = req.params;
+
+  console.log(`📋 Getting REAL evaluators for role: ${role}`);
+
+  // Check cache first (cache key includes role)
+  const cacheKey = `evaluations:evaluators:${role}`;
+  const cached = evaluationCache.get(cacheKey);
+  if (cached) {
+    console.log(`[Cache HIT] evaluations:evaluators:${role}`);
+    return res.json(cached);
+  }
+  console.log(`[Cache MISS] evaluations:evaluators:${role}`);
+
+  const client = await dbPool.connect();
+  try {
+    // Mapear rol a filtros de base de datos
+    let subjectFilter = '';
+    let roleFilter = '';
+
+    switch (role) {
+      case 'TEACHER_MATHEMATICS':
+        subjectFilter = 'MATHEMATICS';
+        roleFilter = "role IN ('TEACHER', 'COORDINATOR')";
+        break;
+      case 'TEACHER_LANGUAGE':
+        subjectFilter = 'LANGUAGE';
+        roleFilter = "role IN ('TEACHER', 'COORDINATOR')";
+        break;
+      case 'TEACHER_ENGLISH':
+        subjectFilter = 'ENGLISH';
+        roleFilter = "role IN ('TEACHER', 'COORDINATOR')";
+        break;
+      case 'CYCLE_DIRECTOR':
+        roleFilter = "role = 'CYCLE_DIRECTOR'";
+        break;
+      case 'PSYCHOLOGIST':
+        roleFilter = "role = 'PSYCHOLOGIST'";
+        break;
+      default:
+        return res.json([]);
+    }
+
+    let query = `
+      SELECT id, first_name as "firstName", last_name as "lastName",
+             email, role, subject, active
+      FROM users
+      WHERE ${roleFilter}
+        AND active = true
+        AND email_verified = true
+    `;
+
+    if (subjectFilter) {
+      query += ` AND subject = '${subjectFilter}'`;
+    }
+
+    query += ' ORDER BY last_name, first_name';
+
+    const result = await client.query(query);
+
+    // Transformar datos para compatibilidad con frontend
+    const evaluators = result.rows.map(user => ({
+      id: parseInt(user.id),
+      firstName: user.firstName,
+      lastName: user.lastName,
+      email: user.email,
+      role: role, // Usar el rol solicitado para compatibilidad
+      active: user.active
+    }));
+
+    console.log(`✅ Found ${evaluators.length} real evaluators for ${role}:`,
+                evaluators.map(e => `${e.firstName} ${e.lastName}`));
+
+    // Cache for 10 minutes
+    evaluationCache.set(cacheKey, evaluators, 600000);
+    res.json(evaluators);
+
+  } catch (error) {
+    console.error('❌ Error fetching real evaluators:', error);
+    // Fallback a datos mock en caso de error
+    const evaluators = mockEvaluatorsByRole[role] || [];
+    res.json(evaluators);
+  } finally {
+    client.release();
+  }
+});
+
+// Get evaluators by role (public endpoint) - AHORA USA DATOS REALES
+app.get('/api/evaluations/public/evaluators/:role', async (req, res) => {
+  const { role } = req.params;
+
+  console.log(`📋 Getting REAL evaluators for role (public): ${role}`);
+
+  const client = await dbPool.connect();
+  try {
+    // Mapear rol a filtros de base de datos
+    let subjectFilter = '';
+    let roleFilter = '';
+
+    switch (role) {
+      case 'TEACHER_MATHEMATICS':
+        subjectFilter = 'MATHEMATICS';
+        roleFilter = "role IN ('TEACHER', 'COORDINATOR')";
+        break;
+      case 'TEACHER_LANGUAGE':
+        subjectFilter = 'LANGUAGE';
+        roleFilter = "role IN ('TEACHER', 'COORDINATOR')";
+        break;
+      case 'TEACHER_ENGLISH':
+        subjectFilter = 'ENGLISH';
+        roleFilter = "role IN ('TEACHER', 'COORDINATOR')";
+        break;
+      case 'CYCLE_DIRECTOR':
+        roleFilter = "role = 'CYCLE_DIRECTOR'";
+        break;
+      case 'PSYCHOLOGIST':
+        roleFilter = "role = 'PSYCHOLOGIST'";
+        break;
+      default:
+        return res.json([]);
+    }
+
+    let query = `
+      SELECT id, first_name as "firstName", last_name as "lastName",
+             email, role, subject, active
+      FROM users
+      WHERE ${roleFilter}
+        AND active = true
+        AND email_verified = true
+    `;
+
+    if (subjectFilter) {
+      query += ` AND subject = '${subjectFilter}'`;
+    }
+
+    query += ' ORDER BY last_name, first_name';
+
+    const result = await client.query(query);
+
+    // Transformar datos para compatibilidad con frontend
+    const evaluators = result.rows.map(user => ({
+      id: parseInt(user.id),
+      firstName: user.firstName,
+      lastName: user.lastName,
+      email: user.email,
+      role: role, // Usar el rol solicitado para compatibilidad
+      active: user.active
+    }));
+
+    console.log(`✅ Found ${evaluators.length} real evaluators for ${role} (public):`,
+                evaluators.map(e => `${e.firstName} ${e.lastName}`));
+    res.json(evaluators);
+
+  } catch (error) {
+    console.error('❌ Error fetching real evaluators (public):', error);
+    // Fallback a datos mock en caso de error
+    const evaluators = mockEvaluatorsByRole[role] || [];
+    res.json(evaluators);
+  } finally {
+    client.release();
+  }
+});
+
+// Assign evaluations to application
+app.post('/api/evaluations/assign/:applicationId', (req, res) => {
+  const { applicationId } = req.params;
+
+  console.log(`🔄 Auto-assigning evaluations to application: ${applicationId}`);
+
+  // Mock automatic assignment - create evaluations for each type
+  const evaluationTypes = ['LANGUAGE_EXAM', 'MATHEMATICS_EXAM', 'ENGLISH_EXAM', 'CYCLE_DIRECTOR_REPORT', 'PSYCHOLOGICAL_INTERVIEW'];
+  const newEvaluations = [];
+
+  evaluationTypes.forEach((type, index) => {
+    const evaluation = {
+      id: Date.now() + index,
+      evaluationType: type,
+      status: 'PENDING',
+      applicationId: parseInt(applicationId),
+      evaluatorId: Math.floor(Math.random() * 10) + 1,
+      createdAt: new Date().toISOString(),
+      evaluator: {
+        id: Math.floor(Math.random() * 10) + 1,
+        firstName: 'Evaluador',
+        lastName: `${index + 1}`,
+        email: `evaluador${index + 1}@mtn.cl`
+      }
+    };
+    newEvaluations.push(evaluation);
+    mockEvaluations.push(evaluation);
+  });
+
+  res.json(newEvaluations);
+});
+
+// Assign evaluations to application (public endpoint)
+app.post('/api/evaluations/public/assign/:applicationId', (req, res) => {
+  const { applicationId } = req.params;
+
+  console.log(`🔄 Auto-assigning evaluations to application (public): ${applicationId}`);
+
+  // Mock automatic assignment - create evaluations for each type
+  const evaluationTypes = ['LANGUAGE_EXAM', 'MATHEMATICS_EXAM', 'ENGLISH_EXAM', 'CYCLE_DIRECTOR_REPORT', 'PSYCHOLOGICAL_INTERVIEW'];
+  const newEvaluations = [];
+
+  evaluationTypes.forEach((type, index) => {
+    const evaluation = {
+      id: Date.now() + index,
+      evaluationType: type,
+      status: 'PENDING',
+      applicationId: parseInt(applicationId),
+      evaluatorId: Math.floor(Math.random() * 10) + 1,
+      createdAt: new Date().toISOString(),
+      evaluator: {
+        id: Math.floor(Math.random() * 10) + 1,
+        firstName: 'Evaluador',
+        lastName: `${index + 1}`,
+        email: `evaluador${index + 1}@mtn.cl`
+      }
+    };
+    newEvaluations.push(evaluation);
+    mockEvaluations.push(evaluation);
+  });
+
+  res.json(newEvaluations);
+});
+
+// Assign specific evaluation to specific evaluator
+app.post('/api/evaluations/assign/:applicationId/:evaluationType/:evaluatorId', (req, res) => {
+  const { applicationId, evaluationType, evaluatorId } = req.params;
+
+  console.log(`🎯 Assigning specific evaluation: ${evaluationType} to evaluator ${evaluatorId} for application ${applicationId}`);
+
+  const evaluation = {
+    id: Date.now(),
+    evaluationType,
+    status: 'PENDING',
+    applicationId: parseInt(applicationId),
+    evaluatorId: parseInt(evaluatorId),
+    createdAt: new Date().toISOString(),
+    evaluator: {
+      id: parseInt(evaluatorId),
+      firstName: 'Evaluador',
+      lastName: 'Específico',
+      email: `evaluador${evaluatorId}@mtn.cl`
+    }
+  };
+
+  mockEvaluations.push(evaluation);
+  res.json(evaluation);
+});
+
+// Get evaluations by application
+app.get('/api/evaluations/application/:applicationId', (req, res) => {
+  const { applicationId } = req.params;
+
+  console.log(`📋 Getting evaluations for application: ${applicationId}`);
+
+  const applicationEvaluations = mockEvaluations.filter(
+    eval => eval.applicationId === parseInt(applicationId)
+  );
+
+  res.json(applicationEvaluations);
+});
+
+// Get detailed evaluations by application
+app.get('/api/evaluations/application/:applicationId/detailed', (req, res) => {
+  const { applicationId } = req.params;
+
+  console.log(`📋 Getting detailed evaluations for application: ${applicationId}`);
+
+  const applicationEvaluations = mockEvaluations.filter(
+    eval => eval.applicationId === parseInt(applicationId)
+  );
+
+  // Add more detailed mock data
+  const detailedEvaluations = applicationEvaluations.map(eval => ({
+    ...eval,
+    observations: eval.status === 'COMPLETED' ? 'Evaluación completada satisfactoriamente' : null,
+    strengths: eval.status === 'COMPLETED' ? 'Buen desempeño general' : null,
+    areasForImprovement: eval.status === 'COMPLETED' ? 'Continuar practicando' : null,
+    application: {
+      id: parseInt(applicationId),
+      status: 'SUBMITTED',
+      submissionDate: '2024-01-15T10:00:00Z',
+      student: {
+        firstName: 'Estudiante',
+        lastName: 'Ejemplo',
+        rut: '12.345.678-9',
+        gradeApplied: '1° Básico'
+      }
+    }
+  }));
+
+  res.json(detailedEvaluations);
+});
+
+// Get evaluation progress
+app.get('/api/evaluations/application/:applicationId/progress', (req, res) => {
+  const { applicationId } = req.params;
+
+  console.log(`📊 Getting evaluation progress for application: ${applicationId}`);
+
+  const applicationEvaluations = mockEvaluations.filter(
+    eval => eval.applicationId === parseInt(applicationId)
+  );
+
+  const completedEvaluations = applicationEvaluations.filter(
+    eval => eval.status === 'COMPLETED'
+  ).length;
+
+  const totalEvaluations = applicationEvaluations.length || 5; // Default to 5 evaluation types
+  const completionPercentage = totalEvaluations > 0 ? Math.round((completedEvaluations / totalEvaluations) * 100) : 0;
+
+  const progress = {
+    applicationId: parseInt(applicationId),
+    totalEvaluations,
+    completedEvaluations,
+    completionPercentage,
+    isComplete: completionPercentage === 100,
+    familyInterview: Math.random() > 0.5 // Random mock data
+  };
+
+  res.json(progress);
+});
+
+// Get my evaluations
+app.get('/api/evaluations/my-pending', (req, res) => {
+  console.log('📋 Getting my pending evaluations');
+
+  const pendingEvaluations = mockEvaluations.filter(eval => eval.status === 'PENDING');
+
+  res.json(pendingEvaluations);
+});
+
+// Update evaluation
+app.put('/api/evaluations/:evaluationId', (req, res) => {
+  const { evaluationId } = req.params;
+  const updateData = req.body;
+
+  console.log(`✏️ Updating evaluation ${evaluationId}:`, updateData);
+
+  const evaluationIndex = mockEvaluations.findIndex(eval => eval.id === parseInt(evaluationId));
+
+  if (evaluationIndex !== -1) {
+    mockEvaluations[evaluationIndex] = {
+      ...mockEvaluations[evaluationIndex],
+      ...updateData,
+      updatedAt: new Date().toISOString()
+    };
+    res.json(mockEvaluations[evaluationIndex]);
+  } else {
+    res.status(404).json({ error: 'Evaluation not found' });
+  }
+});
+
+// Get evaluation by ID
+app.get('/api/evaluations/:evaluationId', (req, res) => {
+  const { evaluationId } = req.params;
+
+  console.log(`📋 Getting evaluation by ID: ${evaluationId}`);
+
+  const evaluation = mockEvaluations.find(eval => eval.id === parseInt(evaluationId));
+
+  if (evaluation) {
+    res.json(evaluation);
+  } else {
+    res.status(404).json({ error: 'Evaluation not found' });
+  }
+});
+
+// Bulk assignment
+app.post('/api/evaluations/assign/bulk', (req, res) => {
+  const { applicationIds } = req.body;
+
+  console.log(`🔄 Bulk assigning evaluations to applications:`, applicationIds);
+
+  const results = {
+    totalApplications: applicationIds.length,
+    successCount: applicationIds.length,
+    failureCount: 0,
+    successful: applicationIds.map(id => `Application ${id}`),
+    failed: [],
+    isComplete: true
+  };
+
+  // Mock creation of evaluations for each application
+  applicationIds.forEach(appId => {
+    const evaluationTypes = ['LANGUAGE_EXAM', 'MATHEMATICS_EXAM', 'ENGLISH_EXAM', 'CYCLE_DIRECTOR_REPORT', 'PSYCHOLOGICAL_INTERVIEW'];
+
+    evaluationTypes.forEach((type, index) => {
+      const evaluation = {
+        id: Date.now() + Math.random() * 1000,
+        evaluationType: type,
+        status: 'PENDING',
+        applicationId: parseInt(appId),
+        evaluatorId: Math.floor(Math.random() * 10) + 1,
+        createdAt: new Date().toISOString(),
+        evaluator: {
+          id: Math.floor(Math.random() * 10) + 1,
+          firstName: 'Evaluador',
+          lastName: `${index + 1}`,
+          email: `evaluador${index + 1}@mtn.cl`
+        }
+      };
+      mockEvaluations.push(evaluation);
+    });
+  });
+
+  res.json(results);
+});
+
+// Bulk assignment (public endpoint)
+app.post('/api/evaluations/public/assign/bulk', (req, res) => {
+  const { applicationIds } = req.body;
+
+  console.log(`🔄 Bulk assigning evaluations to applications (public):`, applicationIds);
+
+  const results = {
+    totalApplications: applicationIds.length,
+    successCount: applicationIds.length,
+    failureCount: 0,
+    successful: applicationIds.map(id => `Application ${id}`),
+    failed: [],
+    isComplete: true
+  };
+
+  // Mock creation of evaluations for each application
+  applicationIds.forEach(appId => {
+    const evaluationTypes = ['LANGUAGE_EXAM', 'MATHEMATICS_EXAM', 'ENGLISH_EXAM', 'CYCLE_DIRECTOR_REPORT', 'PSYCHOLOGICAL_INTERVIEW'];
+
+    evaluationTypes.forEach((type, index) => {
+      const evaluation = {
+        id: Date.now() + Math.random() * 1000,
+        evaluationType: type,
+        status: 'PENDING',
+        applicationId: parseInt(appId),
+        evaluatorId: Math.floor(Math.random() * 10) + 1,
+        createdAt: new Date().toISOString(),
+        evaluator: {
+          id: Math.floor(Math.random() * 10) + 1,
+          firstName: 'Evaluador',
+          lastName: `${index + 1}`,
+          email: `evaluador${index + 1}@mtn.cl`
+        }
+      };
+      mockEvaluations.push(evaluation);
+    });
+  });
+
+  res.json(results);
+});
+
+// Reassign evaluation
+app.put('/api/evaluations/:evaluationId/reassign/:newEvaluatorId', (req, res) => {
+  const { evaluationId, newEvaluatorId } = req.params;
+
+  console.log(`🔄 Reassigning evaluation ${evaluationId} to evaluator ${newEvaluatorId}`);
+
+  const evaluationIndex = mockEvaluations.findIndex(eval => eval.id === parseInt(evaluationId));
+
+  if (evaluationIndex !== -1) {
+    mockEvaluations[evaluationIndex].evaluatorId = parseInt(newEvaluatorId);
+    mockEvaluations[evaluationIndex].evaluator = {
+      id: parseInt(newEvaluatorId),
+      firstName: 'Nuevo',
+      lastName: 'Evaluador',
+      email: `evaluador${newEvaluatorId}@mtn.cl`
+    };
+    mockEvaluations[evaluationIndex].updatedAt = new Date().toISOString();
+
+    res.json(mockEvaluations[evaluationIndex]);
+  } else {
+    res.status(404).json({ error: 'Evaluation not found' });
+  }
+});
+
+// Get evaluation statistics
+app.get('/api/evaluations/statistics', (req, res) => {
+  console.log('📊 Getting evaluation statistics');
+
+  const stats = {
+    totalEvaluations: mockEvaluations.length,
+    statusBreakdown: {
+      PENDING: mockEvaluations.filter(e => e.status === 'PENDING').length,
+      IN_PROGRESS: mockEvaluations.filter(e => e.status === 'IN_PROGRESS').length,
+      COMPLETED: mockEvaluations.filter(e => e.status === 'COMPLETED').length
+    },
+    typeBreakdown: {
+      LANGUAGE_EXAM: mockEvaluations.filter(e => e.evaluationType === 'LANGUAGE_EXAM').length,
+      MATHEMATICS_EXAM: mockEvaluations.filter(e => e.evaluationType === 'MATHEMATICS_EXAM').length,
+      ENGLISH_EXAM: mockEvaluations.filter(e => e.evaluationType === 'ENGLISH_EXAM').length,
+      CYCLE_DIRECTOR_REPORT: mockEvaluations.filter(e => e.evaluationType === 'CYCLE_DIRECTOR_REPORT').length,
+      PSYCHOLOGICAL_INTERVIEW: mockEvaluations.filter(e => e.evaluationType === 'PSYCHOLOGICAL_INTERVIEW').length
+    },
+    averageScoresByType: {
+      LANGUAGE_EXAM: 85,
+      MATHEMATICS_EXAM: 88,
+      ENGLISH_EXAM: 82
+    },
+    evaluatorActivity: {
+      'Ana García': 5,
+      'Carlos López': 3,
+      'María Rodríguez': 7,
+      'Pedro Martínez': 4
+    },
+    completionRate: mockEvaluations.length > 0 ?
+      (mockEvaluations.filter(e => e.status === 'COMPLETED').length / mockEvaluations.length) * 100 : 0
+  };
+
+  res.json(stats);
+});
+
+// Get evaluation statistics (public endpoint)
+app.get('/api/evaluations/public/statistics', (req, res) => {
+  console.log('📊 Getting evaluation statistics (public)');
+
+  const stats = {
+    totalEvaluations: mockEvaluations.length,
+    statusBreakdown: {
+      PENDING: mockEvaluations.filter(e => e.status === 'PENDING').length,
+      IN_PROGRESS: mockEvaluations.filter(e => e.status === 'IN_PROGRESS').length,
+      COMPLETED: mockEvaluations.filter(e => e.status === 'COMPLETED').length
+    },
+    typeBreakdown: {
+      LANGUAGE_EXAM: mockEvaluations.filter(e => e.evaluationType === 'LANGUAGE_EXAM').length,
+      MATHEMATICS_EXAM: mockEvaluations.filter(e => e.evaluationType === 'MATHEMATICS_EXAM').length,
+      ENGLISH_EXAM: mockEvaluations.filter(e => e.evaluationType === 'ENGLISH_EXAM').length,
+      CYCLE_DIRECTOR_REPORT: mockEvaluations.filter(e => e.evaluationType === 'CYCLE_DIRECTOR_REPORT').length,
+      PSYCHOLOGICAL_INTERVIEW: mockEvaluations.filter(e => e.evaluationType === 'PSYCHOLOGICAL_INTERVIEW').length
+    },
+    averageScoresByType: {
+      LANGUAGE_EXAM: 85,
+      MATHEMATICS_EXAM: 88,
+      ENGLISH_EXAM: 82
+    },
+    evaluatorActivity: {
+      'Ana García': 5,
+      'Carlos López': 3,
+      'María Rodríguez': 7,
+      'Pedro Martínez': 4
+    },
+    completionRate: mockEvaluations.length > 0 ?
+      (mockEvaluations.filter(e => e.status === 'COMPLETED').length / mockEvaluations.length) * 100 : 0
+  };
+
+  res.json(stats);
+});
+
+console.log('✅ Evaluation management endpoints initialized');
+
+// Cache management endpoints
+app.post('/api/evaluations/cache/clear', (req, res) => {
+  try {
+    const { pattern } = req.body;
+    const cleared = evaluationCache.clear(pattern);
+    res.json({
+      success: true,
+      cleared,
+      message: pattern ? `Cleared ${cleared} cache entries matching: ${pattern}` : `Cleared ${cleared} total cache entries`
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/evaluations/cache/stats', (req, res) => {
+  res.json({
+    cacheStats: evaluationCache.getStats(),
+    cacheSize: evaluationCache.size(),
+    serviceUptime: process.uptime()
+  });
+});
+
+app.listen(port, () => {
+  console.log(`Evaluation Service running on port ${port}`);
+  console.log('✅ Connection pooling enabled');
+  console.log('✅ Circuit breaker enabled for database queries');
+  console.log('✅ In-memory cache enabled');
+  console.log('Cache endpoints:');
+  console.log('  - POST /api/evaluations/cache/clear');
+  console.log('  - GET  /api/evaluations/cache/stats');
+});

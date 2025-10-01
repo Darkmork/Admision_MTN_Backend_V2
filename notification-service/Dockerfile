@@ -1,30 +1,27 @@
 # Dockerfile for Notification Service Microservice
-FROM eclipse-temurin:17-jdk-alpine AS builder
+FROM amazoncorretto:17-alpine AS builder
 
 WORKDIR /build
 
 # Install dependencies
-RUN apk add --no-cache curl bash
+RUN apk add --no-cache curl bash maven
 
 # Copy Maven files
 COPY pom.xml .
-COPY .mvn .mvn
-COPY mvnw .
-RUN chmod +x mvnw
 
 # Download dependencies
-RUN ./mvnw dependency:go-offline -B
+RUN mvn dependency:go-offline -B
 
 # Copy source code
 COPY src src
 
 # Build application
-RUN ./mvnw clean package -DskipTests -B
+RUN mvn clean package -DskipTests -B
 
 # Verify JAR was created
 RUN ls -la target/
 
-FROM eclipse-temurin:17-jdk-alpine AS runtime
+FROM amazoncorretto:17-alpine AS runtime
 
 WORKDIR /app
 

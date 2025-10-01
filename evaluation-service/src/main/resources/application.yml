@@ -6,9 +6,9 @@ spring:
   
   # Database Configuration
   datasource:
-    url: ${DATABASE_URL:jdbc:postgresql://localhost:5434/evaluations_db}
-    username: ${DATABASE_USERNAME:evaluations_user}
-    password: ${DATABASE_PASSWORD:evaluations_pass}
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/Admisión_MTN_DB}
+    username: ${DATABASE_USERNAME:admin}
+    password: ${DATABASE_PASSWORD:admin123}
     driver-class-name: org.postgresql.Driver
     hikari:
       maximum-pool-size: ${DATABASE_POOL_SIZE:10}

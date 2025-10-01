@@ -1,31 +1,26 @@
 # Multi-stage Docker build for evaluation-service
-FROM eclipse-temurin:17-jdk-alpine AS build
+FROM amazoncorretto:17-alpine AS build
 
 # Install build dependencies
-RUN apk add --no-cache curl
+RUN apk add --no-cache curl maven
 
 # Set working directory
 WORKDIR /app
 
 # Copy Maven files for dependency resolution
 COPY pom.xml ./
-COPY .mvn .mvn
-COPY mvnw ./
-
-# Make mvnw executable
-RUN chmod +x mvnw
 
 # Download dependencies (this layer will be cached if pom.xml doesn't change)
-RUN ./mvnw dependency:go-offline -B
+RUN mvn dependency:go-offline -B
 
 # Copy source code
 COPY src ./src
 
 # Build the application
-RUN ./mvnw clean package -DskipTests -B
+RUN mvn clean package -DskipTests -B
 
 # Runtime stage
-FROM eclipse-temurin:17-jre-alpine AS runtime
+FROM amazoncorretto:17-alpine AS runtime
 
 # Install runtime dependencies and create user
 RUN apk add --no-cache \
