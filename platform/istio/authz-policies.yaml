@@ -1,0 +1,337 @@
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-all-default
+  namespace: admissions
+  labels:
+    app.kubernetes.io/name: mtn-admission-system
+    app.kubernetes.io/component: security
+    app.kubernetes.io/version: "1.0"
+    app.kubernetes.io/managed-by: platform-security-team
+spec:
+  # Default deny-all policy - everything else must be explicitly allowed
+  # This implements the principle of least privilege
+  {}
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-gateway-to-services
+  namespace: admissions
+  labels:
+    app.kubernetes.io/name: api-gateway
+    app.kubernetes.io/component: security
+spec:
+  # Allow API Gateway to communicate with all backend services
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/istio-system/sa/istio-ingressgateway-service-account"]
+        - source:
+            principals: ["cluster.local/ns/admissions/sa/api-gateway"]
+      to:
+        - operation:
+            methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+            paths: ["/api/*", "/actuator/health", "/actuator/info"]
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-ingress-to-gateway
+  namespace: admissions
+  labels:
+    app.kubernetes.io/name: api-gateway
+    app.kubernetes.io/component: security
+spec:
+  # Allow ingress controller to reach API Gateway
+  selector:
+    matchLabels:
+      app: api-gateway
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/istio-system/sa/istio-ingressgateway-service-account"]
+      to:
+        - operation:
+            methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+            ports: ["8080", "8443"]
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: app-to-evaluation
+  namespace: admissions
+  labels:
+    app.kubernetes.io/name: application-service
+    app.kubernetes.io/component: security
+spec:
+  # Allow application service to call evaluation service
+  selector:
+    matchLabels:
+      app: evaluation-service
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/admissions/sa/application-service"]
+        - source:
+            principals: ["cluster.local/ns/admissions/sa/api-gateway"]
+      to:
+        - operation:
+            methods: ["GET", "POST", "PATCH"]
+            paths: ["/evaluations/*", "/interviews/*", "/scores/*"]
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: app-to-notification
+  namespace: admissions
+  labels:
+    app.kubernetes.io/name: application-service
+    app.kubernetes.io/component: security
+spec:
+  # Allow application service to trigger notifications
+  selector:
+    matchLabels:
+      app: notification-service
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/admissions/sa/application-service"]
+        - source:
+            principals: ["cluster.local/ns/admissions/sa/evaluation-service"]
+        - source:
+            principals: ["cluster.local/ns/admissions/sa/api-gateway"]
+      to:
+        - operation:
+            methods: ["POST", "PUT"]
+            paths: ["/notifications/*", "/email/*", "/templates/*"]
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: evaluation-to-notification
+  namespace: admissions
+  labels:
+    app.kubernetes.io/name: evaluation-service
+    app.kubernetes.io/component: security
+spec:
+  # Allow evaluation service to send notifications
+  selector:
+    matchLabels:
+      app: notification-service
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/admissions/sa/evaluation-service"]
+      to:
+        - operation:
+            methods: ["POST"]
+            paths: ["/notifications/evaluation-complete", "/email/evaluation-results"]
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: services-to-database
+  namespace: postgres
+  labels:
+    app.kubernetes.io/name: postgresql
+    app.kubernetes.io/component: security
+spec:
+  # Allow application services to access database
+  selector:
+    matchLabels:
+      app: postgresql
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: 
+              - "cluster.local/ns/admissions/sa/application-service"
+              - "cluster.local/ns/admissions/sa/user-service"
+              - "cluster.local/ns/admissions/sa/evaluation-service"
+              - "cluster.local/ns/admissions/sa/notification-service"
+      to:
+        - operation:
+            ports: ["5432"]
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: services-to-rabbitmq
+  namespace: rabbitmq
+  labels:
+    app.kubernetes.io/name: rabbitmq
+    app.kubernetes.io/component: security
+spec:
+  # Allow services to publish/consume messages
+  selector:
+    matchLabels:
+      app: rabbitmq
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/admissions/sa/application-service"
+              - "cluster.local/ns/admissions/sa/evaluation-service" 
+              - "cluster.local/ns/admissions/sa/notification-service"
+      to:
+        - operation:
+            ports: ["5672", "25672"]
+    # Allow management UI access from monitoring
+    - from:
+        - source:
+            principals: 
+              - "cluster.local/ns/monitoring/sa/prometheus"
+              - "cluster.local/ns/monitoring/sa/grafana"
+      to:
+        - operation:
+            ports: ["15672"]
+            methods: ["GET"]
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: services-to-keycloak
+  namespace: keycloak
+  labels:
+    app.kubernetes.io/name: keycloak
+    app.kubernetes.io/component: security
+spec:
+  # Allow services to validate JWT tokens
+  selector:
+    matchLabels:
+      app: keycloak
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/admissions/sa/api-gateway"
+              - "cluster.local/ns/admissions/sa/application-service"
+              - "cluster.local/ns/admissions/sa/user-service"
+              - "cluster.local/ns/admissions/sa/evaluation-service"
+              - "cluster.local/ns/admissions/sa/notification-service"
+      to:
+        - operation:
+            ports: ["8080", "8443"]
+            paths: ["/realms/*/protocol/openid-connect/certs", "/realms/*/protocol/openid-connect/userinfo"]
+            methods: ["GET"]
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-monitoring
+  namespace: admissions
+  labels:
+    app.kubernetes.io/name: monitoring
+    app.kubernetes.io/component: security
+spec:
+  # Allow monitoring to scrape metrics from all services
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: 
+              - "cluster.local/ns/monitoring/sa/prometheus"
+              - "cluster.local/ns/monitoring/sa/grafana"
+              - "cluster.local/ns/istio-system/sa/prometheus"
+      to:
+        - operation:
+            methods: ["GET"]
+            paths: ["/actuator/prometheus", "/actuator/health", "/actuator/info", "/metrics"]
+            ports: ["9464", "15090"]
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-liveness-probes
+  namespace: admissions
+  labels:
+    app.kubernetes.io/name: kubernetes-probes
+    app.kubernetes.io/component: security
+spec:
+  # Allow Kubernetes liveness/readiness probes
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/kube-system/sa/kubelet"]
+      to:
+        - operation:
+            methods: ["GET"]
+            paths: ["/actuator/health", "/health", "/ready", "/live"]
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-jaeger-tracing
+  namespace: admissions
+  labels:
+    app.kubernetes.io/name: jaeger
+    app.kubernetes.io/component: security
+spec:
+  # Allow services to send traces to Jaeger
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/admissions/sa/api-gateway"
+              - "cluster.local/ns/admissions/sa/application-service"
+              - "cluster.local/ns/admissions/sa/user-service" 
+              - "cluster.local/ns/admissions/sa/evaluation-service"
+              - "cluster.local/ns/admissions/sa/notification-service"
+      to:
+        - operation:
+            ports: ["14250", "14268", "9411"]
+            methods: ["POST"]
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-external-secrets-operator
+  namespace: admissions
+  labels:
+    app.kubernetes.io/name: external-secrets-operator
+    app.kubernetes.io/component: security
+spec:
+  # Allow External Secrets Operator to sync secrets
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: 
+              - "cluster.local/ns/external-secrets-system/sa/external-secrets"
+              - "cluster.local/ns/external-secrets-system/sa/external-secrets-operator"
+      to:
+        - operation:
+            methods: ["GET", "POST", "PUT", "PATCH"]
+---
+apiVersion: security.istio.io/v1beta1  
+kind: AuthorizationPolicy
+metadata:
+  name: allow-vault-access
+  namespace: admissions
+  labels:
+    app.kubernetes.io/name: vault-access
+    app.kubernetes.io/component: security
+spec:
+  # Allow services to access Vault for secret retrieval
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/admissions/sa/application-service"
+              - "cluster.local/ns/admissions/sa/notification-service"
+              - "cluster.local/ns/external-secrets-system/sa/external-secrets"
+      to:
+        - operation:
+            methods: ["GET", "POST"]
+            paths: ["/v1/auth/kubernetes/login", "/v1/kv/*", "/v1/database/creds/*"]

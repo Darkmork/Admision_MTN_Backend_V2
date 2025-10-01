@@ -1,0 +1,365 @@
+# Security Monitoring and Alerting Configuration
+# Comprehensive security observability for MTN Admission System
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: security-monitoring-config
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/component: security-config
+    app.kubernetes.io/part-of: mtn-admission
+data:
+  # Security Alert Rules for Prometheus
+  security-rules.yaml: |
+    groups:
+      # Authentication and Authorization Security
+      - name: mtn.authentication.security
+        interval: 30s
+        rules:
+          # High rate of authentication failures
+          - alert: AuthenticationFailureSpike
+            expr: rate(gateway_authentication_failures_total[5m]) > 10
+            for: 1m
+            labels:
+              severity: warning
+              category: security
+              compliance: chilean-pii
+            annotations:
+              summary: "Alto número de fallos de autenticación detectado"
+              description: "{{ $value }} fallos de autenticación por minuto en los últimos 5 minutos desde {{ $labels.source_ip }}"
+              runbook_url: "https://runbooks.mtn.cl/security/authentication-failures"
+              action_required: "Verificar intentos de acceso no autorizado"
+              chile_timezone: "{{ with query \"vector(time())\" }}{{ . | first | value | humanizeTimestamp }}{{ end }} CLT"
+
+          # Suspicious JWT token usage
+          - alert: InvalidJWTTokens
+            expr: rate(spring_security_authentication_failures_total{reason="invalid_jwt"}[5m]) > 5
+            for: 2m
+            labels:
+              severity: warning
+              category: security
+              compliance: chilean-pii
+            annotations:
+              summary: "Tokens JWT inválidos detectados"
+              description: "{{ $value }} tokens JWT inválidos por minuto en el servicio {{ $labels.service }}"
+              runbook_url: "https://runbooks.mtn.cl/security/invalid-jwt-tokens"
+              chile_timezone: "{{ with query \"vector(time())\" }}{{ . | first | value | humanizeTimestamp }}{{ end }} CLT"
+
+          # Privilege escalation attempts
+          - alert: PrivilegeEscalationAttempt
+            expr: rate(spring_security_access_denied_total{endpoint=~".*admin.*"}[5m]) > 3
+            for: 1m
+            labels:
+              severity: critical
+              category: security
+              compliance: chilean-banking
+            annotations:
+              summary: "CRÍTICO: Intento de escalación de privilegios detectado"
+              description: "Usuario {{ $labels.user }} intentando acceder a endpoints administrativos sin permisos"
+              runbook_url: "https://runbooks.mtn.cl/security/privilege-escalation"
+              immediate_action: "Bloquear IP inmediatamente"
+              chile_timezone: "{{ with query \"vector(time())\" }}{{ . | first | value | humanizeTimestamp }}{{ end }} CLT"
+
+      # Rate Limiting and DDoS Protection
+      - name: mtn.ratelimiting.security
+        interval: 30s
+        rules:
+          # Rate limit exceeded frequently
+          - alert: RateLimitExceededFrequently
+            expr: rate(gateway_rate_limit_exceeded_total[5m]) > 20
+            for: 2m
+            labels:
+              severity: warning
+              category: security
+            annotations:
+              summary: "Límites de velocidad excedidos frecuentemente"
+              description: "IP {{ $labels.source_ip }} excediendo límites de velocidad {{ $value }} veces por minuto"
+              runbook_url: "https://runbooks.mtn.cl/security/rate-limiting"
+
+          # Potential DDoS attack
+          - alert: PotentialDDoSAttack
+            expr: rate(gateway_requests_total[1m]) > 1000
+            for: 30s
+            labels:
+              severity: critical
+              category: security
+            annotations:
+              summary: "CRÍTICO: Posible ataque DDoS detectado"
+              description: "{{ $value }} peticiones por minuto - posible ataque DDoS"
+              runbook_url: "https://runbooks.mtn.cl/security/ddos-response"
+              immediate_action: "Activar protección DDoS"
+
+          # Suspicious activity from single IP
+          - alert: SuspiciousIPActivity
+            expr: rate(gateway_suspicious_activity_total[5m]) > 5
+            for: 1m
+            labels:
+              severity: warning
+              category: security
+            annotations:
+              summary: "Actividad sospechosa desde IP {{ $labels.source_ip }}"
+              description: "Actividad anómala detectada: {{ $labels.activity_type }}"
+              runbook_url: "https://runbooks.mtn.cl/security/suspicious-activity"
+
+      # Data Protection and PII Compliance
+      - name: mtn.dataprotection.security
+        interval: 60s
+        rules:
+          # Unencrypted PII data access
+          - alert: UnencryptedPIIAccess
+            expr: increase(application_pii_unencrypted_access_total[5m]) > 0
+            for: 0s
+            labels:
+              severity: critical
+              category: security
+              compliance: chilean-pii
+            annotations:
+              summary: "CRÍTICO: Acceso a datos PII no cifrados"
+              description: "Acceso a datos PII chilenos sin cifrado en {{ $labels.service }}"
+              runbook_url: "https://runbooks.mtn.cl/compliance/pii-protection"
+              compliance_action: "Notificar a DPO inmediatamente"
+
+          # Encryption key rotation overdue
+          - alert: EncryptionKeyRotationOverdue
+            expr: (time() - vault_key_last_rotation_timestamp) > 86400 * 7
+            for: 0s
+            labels:
+              severity: warning
+              category: security
+              compliance: chilean-banking
+            annotations:
+              summary: "Rotación de claves de cifrado retrasada"
+              description: "Clave {{ $labels.key_name }} no rotada en {{ $value | humanizeDuration }}"
+              runbook_url: "https://runbooks.mtn.cl/security/key-rotation"
+
+          # Database credential rotation overdue
+          - alert: DatabaseCredentialRotationOverdue
+            expr: (time() - vault_database_credential_last_rotation_timestamp) > 3600 * 24
+            for: 0s
+            labels:
+              severity: warning
+              category: security
+            annotations:
+              summary: "Rotación de credenciales de BD retrasada"
+              description: "Credenciales de {{ $labels.database }} no rotadas en {{ $value | humanizeDuration }}"
+              runbook_url: "https://runbooks.mtn.cl/security/credential-rotation"
+
+      # Service Communication Security
+      - name: mtn.servicemesh.security
+        interval: 30s
+        rules:
+          # mTLS certificate expiration
+          - alert: mTLSCertificateExpiringSoon
+            expr: (istio_certificate_expiration_timestamp - time()) < 86400 * 7
+            for: 0s
+            labels:
+              severity: warning
+              category: security
+            annotations:
+              summary: "Certificado mTLS expirando pronto"
+              description: "Certificado para {{ $labels.service }} expira en {{ $value | humanizeDuration }}"
+              runbook_url: "https://runbooks.mtn.cl/security/certificate-renewal"
+
+          # Unencrypted service communication
+          - alert: UnencryptedServiceCommunication
+            expr: istio_requests_total{security_policy="none"} > 0
+            for: 0s
+            labels:
+              severity: critical
+              category: security
+            annotations:
+              summary: "CRÍTICO: Comunicación entre servicios sin cifrar"
+              description: "Comunicación sin mTLS entre {{ $labels.source_service }} y {{ $labels.destination_service }}"
+              runbook_url: "https://runbooks.mtn.cl/security/enforce-mtls"
+
+      # Security Audit and Compliance
+      - name: mtn.audit.security
+        interval: 300s  # 5 minutes
+        rules:
+          # Missing security headers
+          - alert: MissingSecurityHeaders
+            expr: rate(gateway_missing_security_headers_total[5m]) > 0
+            for: 1m
+            labels:
+              severity: warning
+              category: security
+              compliance: chilean-banking
+            annotations:
+              summary: "Headers de seguridad faltantes"
+              description: "Header {{ $labels.header_name }} faltante en respuestas de {{ $labels.service }}"
+              runbook_url: "https://runbooks.mtn.cl/security/security-headers"
+
+          # Vault unsealed status
+          - alert: VaultSealedStatus
+            expr: vault_core_unsealed == 0
+            for: 0s
+            labels:
+              severity: critical
+              category: security
+            annotations:
+              summary: "CRÍTICO: Vault está sellado"
+              description: "HashiCorp Vault está en estado sellado - secretos no disponibles"
+              runbook_url: "https://runbooks.mtn.cl/security/vault-unseal"
+              immediate_action: "Dessellar Vault inmediatamente"
+
+          # External Secrets Operator failures
+          - alert: ExternalSecretsFailure
+            expr: rate(external_secrets_operator_reconcile_errors_total[5m]) > 0
+            for: 2m
+            labels:
+              severity: warning
+              category: security
+            annotations:
+              summary: "External Secrets Operator con errores"
+              description: "ESO no puede sincronizar secreto {{ $labels.secret_name }}"
+              runbook_url: "https://runbooks.mtn.cl/security/external-secrets-troubleshoot"
+
+      # Chilean Compliance Specific
+      - name: mtn.chilean.compliance
+        interval: 300s
+        rules:
+          # RUT data access without proper authorization
+          - alert: UnauthorizedRUTAccess
+            expr: rate(application_rut_access_unauthorized_total[5m]) > 0
+            for: 0s
+            labels:
+              severity: critical
+              category: security
+              compliance: chilean-pii
+            annotations:
+              summary: "CRÍTICO: Acceso no autorizado a datos RUT"
+              description: "Usuario {{ $labels.user }} accedió a datos RUT sin autorización"
+              runbook_url: "https://runbooks.mtn.cl/compliance/rut-protection"
+              compliance_action: "Notificar a autoridades chilenas"
+
+          # Chilean timezone violations
+          - alert: NonChileanTimezoneUsage
+            expr: rate(application_timezone_violation_total[5m]) > 0
+            for: 1m
+            labels:
+              severity: warning
+              category: compliance
+              compliance: chilean-timezone
+            annotations:
+              summary: "Uso de zona horaria no chilena detectado"
+              description: "Servicio {{ $labels.service }} usando timezone {{ $labels.timezone }}"
+              runbook_url: "https://runbooks.mtn.cl/compliance/timezone-enforcement"
+
+  # AlertManager routing for security alerts
+  alertmanager-security-routing.yaml: |
+    route:
+      group_by: ['alertname', 'severity', 'category']
+      group_wait: 10s
+      group_interval: 10s
+      repeat_interval: 1h
+      receiver: 'mtn-security-team'
+      routes:
+        # Critical security alerts - immediate notification
+        - match:
+            severity: critical
+            category: security
+          receiver: 'mtn-security-critical'
+          group_wait: 0s
+          repeat_interval: 5m
+          continue: true
+        
+        # Chilean compliance violations
+        - match:
+            compliance: chilean-pii
+          receiver: 'mtn-compliance-team'
+          group_wait: 0s
+          repeat_interval: 15m
+          continue: true
+        
+        # Banking level security
+        - match:
+            compliance: chilean-banking
+          receiver: 'mtn-banking-security'
+          group_wait: 0s
+          repeat_interval: 10m
+          continue: true
+
+    receivers:
+      - name: 'mtn-security-team'
+        email_configs:
+          - to: 'security@mtn.cl'
+            subject: '[MTN Admission] Alerta de Seguridad: {{ .GroupLabels.alertname }}'
+            body: |
+              🚨 ALERTA DE SEGURIDAD - Sistema de Admisión MTN
+              
+              📅 Fecha/Hora: {{ with query "vector(time())" }}{{ . | first | value | humanizeTimestamp }}{{ end }} CLT
+              🔍 Alerta: {{ .GroupLabels.alertname }}
+              📊 Severidad: {{ .GroupLabels.severity }}
+              🏷️ Categoría: {{ .GroupLabels.category }}
+              
+              📋 DETALLES:
+              {{ range .Alerts }}
+              - {{ .Annotations.summary }}
+              - Descripción: {{ .Annotations.description }}
+              - Runbook: {{ .Annotations.runbook_url }}
+              {{ if .Annotations.action_required }}- ⚡ Acción requerida: {{ .Annotations.action_required }}{{ end }}
+              {{ if .Annotations.immediate_action }}- 🚨 ACCIÓN INMEDIATA: {{ .Annotations.immediate_action }}{{ end }}
+              {{ end }}
+              
+              🔗 Dashboard: https://grafana.mtn.cl/d/security-overview
+              📚 Runbooks: https://runbooks.mtn.cl/security/
+              
+              --
+              Sistema de Monitoreo MTN | Zona Horaria: Chile Continental (CLT)
+
+      - name: 'mtn-security-critical'
+        slack_configs:
+          - api_url: '${SLACK_SECURITY_WEBHOOK_URL}'
+            channel: '#mtn-security-critical'
+            title: '🚨 ALERTA CRÍTICA DE SEGURIDAD'
+            text: |
+              {{ range .Alerts }}
+              *{{ .Annotations.summary }}*
+              {{ .Annotations.description }}
+              {{ if .Annotations.immediate_action }}⚡ *ACCIÓN INMEDIATA*: {{ .Annotations.immediate_action }}{{ end }}
+              📚 Runbook: {{ .Annotations.runbook_url }}
+              {{ end }}
+        
+        pagerduty_configs:
+          - routing_key: '${PAGERDUTY_SECURITY_KEY}'
+            description: 'Alerta crítica de seguridad en Sistema de Admisión MTN'
+            severity: 'critical'
+            client: 'MTN Admission Security Monitor'
+            client_url: 'https://grafana.mtn.cl/d/security-overview'
+
+      - name: 'mtn-compliance-team'
+        email_configs:
+          - to: 'compliance@mtn.cl,dpo@mtn.cl'
+            subject: '[COMPLIANCE] {{ .GroupLabels.compliance }} - {{ .GroupLabels.alertname }}'
+            body: |
+              ⚖️ ALERTA DE CUMPLIMIENTO - Sistema de Admisión MTN
+              
+              📅 Fecha/Hora: {{ with query "vector(time())" }}{{ . | first | value | humanizeTimestamp }}{{ end }} CLT
+              ⚖️ Tipo de Cumplimiento: {{ .GroupLabels.compliance }}
+              🔍 Alerta: {{ .GroupLabels.alertname }}
+              
+              {{ range .Alerts }}
+              📋 DETALLES:
+              - {{ .Annotations.summary }}
+              - {{ .Annotations.description }}
+              {{ if .Annotations.compliance_action }}- 📋 Acción de Cumplimiento: {{ .Annotations.compliance_action }}{{ end }}
+              
+              🔗 Runbook: {{ .Annotations.runbook_url }}
+              {{ end }}
+              
+              Este es un evento de cumplimiento que requiere revisión según normativas chilenas.
+
+      - name: 'mtn-banking-security'
+        email_configs:
+          - to: 'banking-security@mtn.cl'
+            subject: '[BANKING SECURITY] {{ .GroupLabels.alertname }}'
+            body: |
+              🏦 ALERTA DE SEGURIDAD BANCARIA - Sistema de Admisión MTN
+              
+              Se ha detectado un evento que requiere atención según estándares de seguridad bancaria chilena.
+              
+              {{ range .Alerts }}
+              {{ .Annotations.summary }}
+              {{ .Annotations.description }}
+              {{ end }}

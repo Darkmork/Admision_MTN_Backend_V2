@@ -1,0 +1,159 @@
+# Development environment values for <service>
+# Override base values for development deployment
+
+image:
+  tag: "dev"
+  pullPolicy: Always
+
+# Development resource limits (lower)
+resources:
+  limits:
+    cpu: 200m
+    memory: 256Mi
+  requests:
+    cpu: 50m
+    memory: 128Mi
+
+# Less replicas for dev
+replicaCount: 1
+
+# Disable autoscaling in dev
+autoscaling:
+  enabled: false
+
+# Faster rollout for dev environment
+rollout:
+  canary:
+    steps:
+      - setWeight: 50
+      - pause: { duration: 30s }
+      - setWeight: 100
+    analysis:
+      interval: 5s
+      count: 3
+
+# Development environment variables
+env:
+  - name: SPRING_PROFILES_ACTIVE
+    value: "kubernetes,dev"
+  - name: LOGGING_LEVEL_COM_DESAFIOS_MTN
+    value: "DEBUG"
+  - name: SPRING_JPA_SHOW_SQL
+    value: "true"
+  - name: JAVA_OPTS
+    value: "-Xmx200m -XX:+UseG1GC -XX:+UseContainerSupport -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005"
+
+# Development ingress
+ingress:
+  enabled: true
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+  hosts:
+    - host: <service>-dev.mtn.local
+      paths:
+        - path: /
+          pathType: Prefix
+
+# Development database configuration (if applicable)
+configMap:
+  enabled: true
+  data:
+    DATABASE_URL: "jdbc:postgresql://postgresql-dev:5432/<service>_dev"
+    DATABASE_NAME: "<service>_dev"
+    RABBITMQ_HOST: "rabbitmq-dev"
+    REDIS_HOST: "redis-dev"
+    LOG_LEVEL: "DEBUG"
+
+# Development secrets (use external secrets in real environments)
+secret:
+  enabled: true
+  data:
+    DATABASE_USERNAME: "ZGV2dXNlcg=="  # base64: devuser
+    DATABASE_PASSWORD: "ZGV2cGFzcw=="  # base64: devpass
+    JWT_SECRET: "ZGV2LWp3dC1zZWNyZXQtdmVyeS1sb25nLWFuZC1zZWN1cmU="  # base64: dev-jwt-secret-very-long-and-secure
+
+# Enable debug tools
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/path: "/actuator/prometheus"
+  prometheus.io/port: "8080"
+  debug.mtn.cl/enabled: "true"
+
+# Relaxed security for development
+podSecurityContext:
+  runAsNonRoot: false
+
+# Development networking
+service:
+  type: NodePort
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+
+# Enable all monitoring in dev
+monitoring:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    interval: 15s
+  prometheusRule:
+    enabled: true
+
+# Development node selection (if using multi-env cluster)
+nodeSelector:
+  environment: development
+
+# Development tolerations
+tolerations:
+  - key: "dev-only"
+    operator: "Equal"
+    value: "true"
+    effect: "NoSchedule"
+
+# Development health checks (faster)
+healthChecks:
+  livenessProbe:
+    initialDelaySeconds: 10
+    periodSeconds: 5
+  readinessProbe:
+    initialDelaySeconds: 5
+    periodSeconds: 3
+  startupProbe:
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    failureThreshold: 20
+
+# Development build metadata
+build:
+  sha: "dev-latest"
+  url: "https://github.com/mtn-org/<service>/actions/runs/dev"
+  deploymentId: "dev-manual"
+  timestamp: ""
+  triggeredBy: "developer"
+
+# Disable PDB for development
+podDisruptionBudget:
+  enabled: false
+
+# Enable persistence for development data
+persistence:
+  enabled: false  # Usually false for dev, enable if needed for testing
+
+# Development-specific init containers (if needed)
+initContainers: []
+
+# Development volumes for local testing
+extraVolumes: []
+
+extraVolumeMounts: []
+
+# Common labels for development
+commonLabels:
+  environment: development
+  tier: backend
+  version: dev
+
+commonAnnotations:
+  mtn.cl/environment: development
+  mtn.cl/managed-by: helm
+  mtn.cl/debug: enabled

@@ -1,6 +1,0 @@
--- Datos de inicialización para H2
--- Este archivo se ejecuta automáticamente al iniciar la aplicación
-
--- Insertar un usuario de prueba simple
-INSERT INTO users (email, password, first_name, last_name, role, phone, rut, email_verified, active, created_at) VALUES
-('test@test.com', '$2a$10$example_hash', 'Usuario', 'Test', 'APODERADO', '+56912345678', '12345678-9', true, true, NOW());

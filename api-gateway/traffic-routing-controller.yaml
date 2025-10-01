@@ -1,0 +1,379 @@
+# Traffic Routing Controller for Dynamic Feature Flag Management
+# Automatically updates Kong Gateway configuration based on feature flag changes
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traffic-routing-controller
+  namespace: mtn-gateway
+  labels:
+    app: traffic-routing-controller
+    component: controller
+    environment: production
+spec:
+  replicas: 1  # Single replica to avoid conflicts
+  selector:
+    matchLabels:
+      app: traffic-routing-controller
+  template:
+    metadata:
+      labels:
+        app: traffic-routing-controller
+        component: controller
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: traffic-routing-controller
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        fsGroup: 1001
+      containers:
+      - name: controller
+        image: ghcr.io/mtn-org/traffic-routing-controller:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        - name: webhook
+          containerPort: 9443
+          protocol: TCP
+        env:
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: CONTROLLER_NAME
+          value: "traffic-routing-controller"
+        - name: FEATURE_FLAG_SERVICE_URL
+          value: "http://feature-flag-service:8080"
+        - name: KONG_ADMIN_URL
+          value: "http://kong-admin.kong-system.svc.cluster.local:8001"
+        - name: REDIS_URL
+          value: "redis://redis.mtn-gateway.svc.cluster.local:6379"
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: SYNC_INTERVAL
+          value: "30s"
+        - name: WEBHOOK_CERT_DIR
+          value: "/tmp/k8s-webhook-server/serving-certs"
+        command:
+        - /manager
+        args:
+        - --config=/app/config/controller-config.yaml
+        - --zap-log-level=info
+        - --zap-encoder=json
+        - --leader-elect=true
+        - --health-probe-bind-address=:8080
+        - --metrics-bind-address=:8080
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 200m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        volumeMounts:
+        - name: config
+          mountPath: /app/config
+          readOnly: true
+        - name: webhook-certs
+          mountPath: /tmp/k8s-webhook-server/serving-certs
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: traffic-routing-controller-config
+      - name: webhook-certs
+        secret:
+          secretName: traffic-routing-webhook-certs
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: traffic-routing-controller
+  namespace: mtn-gateway
+  labels:
+    app: traffic-routing-controller
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http
+    protocol: TCP
+  - name: webhook
+    port: 9443
+    targetPort: webhook
+    protocol: TCP
+  selector:
+    app: traffic-routing-controller
+
+---
+# Service Account with necessary permissions
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: traffic-routing-controller
+  namespace: mtn-gateway
+  labels:
+    app: traffic-routing-controller
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: traffic-routing-controller
+rules:
+# Core Kubernetes resources
+- apiGroups: [""]
+  resources: ["services", "endpoints", "configmaps", "secrets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses", "networkpolicies"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+# Kong CRDs
+- apiGroups: ["configuration.konghq.com"]
+  resources: ["kongingresses", "kongplugins", "kongconsumers", "kongcredentials"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# Argo Rollouts
+- apiGroups: ["argoproj.io"]
+  resources: ["rollouts", "analysistemplates", "analysisruns"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+# Events for logging
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+# Metrics
+- apiGroups: ["metrics.k8s.io"]
+  resources: ["*"]
+  verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: traffic-routing-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: traffic-routing-controller
+subjects:
+- kind: ServiceAccount
+  name: traffic-routing-controller
+  namespace: mtn-gateway
+
+---
+# Controller Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: traffic-routing-controller-config
+  namespace: mtn-gateway
+  labels:
+    app: traffic-routing-controller
+data:
+  controller-config.yaml: |
+    # Traffic Routing Controller Configuration
+    controller:
+      name: traffic-routing-controller
+      namespace: mtn-gateway
+      sync-interval: 30s
+      leader-elect: true
+      
+    feature-flags:
+      service-url: http://feature-flag-service:8080
+      api-key: ${FEATURE_FLAG_API_KEY}
+      cache-ttl: 300s
+      
+    kong:
+      admin-url: http://kong-admin.kong-system.svc.cluster.local:8001
+      api-key: ${KONG_ADMIN_API_KEY}
+      timeout: 30s
+      
+    redis:
+      url: redis://redis.mtn-gateway.svc.cluster.local:6379
+      timeout: 5s
+      
+    routing:
+      services:
+        user-service:
+          paths: ["/api/users/**", "/api/auth/**"]
+          methods: ["GET", "POST", "PUT", "DELETE"]
+          feature-flags: ["user_service_routing"]
+          default-weight: 100
+          canary-weight: 0
+          health-check: "/actuator/health"
+          
+        application-service:
+          paths: ["/api/applications/**", "/api/documents/**"]
+          methods: ["GET", "POST", "PUT", "DELETE"]
+          feature-flags: ["application_service_routing"]
+          default-weight: 100
+          canary-weight: 0
+          health-check: "/actuator/health"
+          
+        evaluation-service:
+          paths: ["/api/evaluations/**", "/api/interviews/**"]
+          methods: ["GET", "POST", "PUT", "DELETE"]
+          feature-flags: ["evaluation_service_routing"]
+          default-weight: 100
+          canary-weight: 0
+          health-check: "/actuator/health"
+          
+        notification-service:
+          paths: ["/api/notifications/**", "/api/email/**"]
+          methods: ["GET", "POST"]
+          feature-flags: ["notification_service_routing"]
+          default-weight: 100
+          canary-weight: 0
+          health-check: "/actuator/health"
+          
+        admision-monolith:
+          paths: ["/api/legacy/**"]
+          methods: ["GET", "POST", "PUT", "DELETE"]
+          feature-flags: []
+          default-weight: 0
+          canary-weight: 0
+          health-check: "/actuator/health"
+          
+    canary:
+      analysis:
+        success-rate-threshold: 0.99
+        latency-threshold-ms: 500
+        error-rate-threshold: 0.01
+        min-samples: 100
+        analysis-interval: 30s
+        promotion-interval: 300s
+        
+      rollback:
+        auto-rollback: true
+        rollback-threshold: 0.95
+        cooldown-period: 600s
+        
+    observability:
+      metrics:
+        enabled: true
+        port: 8080
+        path: /metrics
+      tracing:
+        enabled: true
+        endpoint: http://jaeger-collector.monitoring.svc.cluster.local:14268/api/traces
+      logging:
+        level: INFO
+        format: json
+
+  traffic-routing-rules.yaml: |
+    # Traffic Routing Rules Configuration
+    apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: traffic-routing-rules
+      namespace: mtn-gateway
+    data:
+      rules.yaml: |
+        # Default routing rules for MTN services
+        default_rules:
+          - name: "health_check_bypass"
+            description: "Bypass feature flags for health checks"
+            conditions:
+              path_patterns: ["/actuator/health/**", "/health", "/healthz"]
+            actions:
+              bypass_feature_flags: true
+              
+          - name: "admin_bypass"
+            description: "Admin users bypass gradual rollout"
+            conditions:
+              user_roles: ["ADMIN"]
+              headers: ["X-Admin-Override: true"]
+            actions:
+              force_microservice_routing: true
+              
+          - name: "canary_user_targeting"
+            description: "Target specific users for canary deployments"
+            conditions:
+              user_attributes:
+                beta_user: true
+                environment: "staging"
+            actions:
+              canary_weight_override: 100
+              
+        # Service-specific rules
+        service_rules:
+          user-service:
+            - name: "authentication_priority"
+              description: "Always route auth requests to stable version"
+              conditions:
+                path_patterns: ["/api/auth/**"]
+              actions:
+                canary_weight: 0
+                sticky_session: true
+                
+          application-service:
+            - name: "file_upload_routing"
+              description: "Route large file uploads to enhanced service"
+              conditions:
+                content_length: ">10MB"
+                content_type: "multipart/form-data"
+              actions:
+                force_microservice_routing: true
+                timeout: 300s
+                
+          notification-service:
+            - name: "critical_notifications"
+              description: "Route critical notifications to stable version"
+              conditions:
+                headers: ["X-Priority: critical"]
+                path_patterns: ["/api/email/critical/**"]
+              actions:
+                canary_weight: 0
+                retry_policy: aggressive
+
+---
+# Webhook Configuration for Dynamic Updates
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingAdmissionWebhook
+metadata:
+  name: traffic-routing-webhook
+webhooks:
+- name: traffic-routing.mtn.cl
+  clientConfig:
+    service:
+      name: traffic-routing-controller
+      namespace: mtn-gateway
+      path: /mutate
+  rules:
+  - operations: ["CREATE", "UPDATE"]
+    apiGroups: ["configuration.konghq.com"]
+    apiVersions: ["v1"]
+    resources: ["kongingresses", "kongplugins"]
+  - operations: ["CREATE", "UPDATE"]
+    apiGroups: ["argoproj.io"]
+    apiVersions: ["v1alpha1"]
+    resources: ["rollouts"]
+  admissionReviewVersions: ["v1", "v1beta1"]
+  sideEffects: None
+  failurePolicy: Fail

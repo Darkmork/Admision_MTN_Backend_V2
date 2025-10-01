@@ -1,0 +1,330 @@
+name: 'Preflight E2E Tests'
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: Admisión_MTN_DB
+          POSTGRES_USER: admin
+          POSTGRES_PASSWORD: admin123
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - name: 🛒 Checkout code
+      uses: actions/checkout@v4
+
+    - name: ☕ Set up Java 17
+      uses: actions/setup-java@v3
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: maven
+
+    - name: 🔧 Setup Backend Environment
+      run: |
+        echo "Setting up database schema..."
+        PGPASSWORD=admin123 psql -h localhost -U admin -d "Admisión_MTN_DB" -c "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";"
+        
+        # Create test users
+        if [ -f "src/test/resources/e2e-fixtures/test-users.sql" ]; then
+          PGPASSWORD=admin123 psql -h localhost -U admin -d "Admisión_MTN_DB" -f "src/test/resources/e2e-fixtures/test-users.sql"
+        fi
+
+    - name: 🏗️ Build Backend
+      run: mvn clean compile -DskipTests
+
+    - name: 🚀 Start Backend Application
+      run: |
+        nohup mvn spring-boot:run \
+          -Dspring.datasource.url="jdbc:postgresql://localhost:5432/Admisión_MTN_DB" \
+          -Dspring.datasource.username=admin \
+          -Dspring.datasource.password=admin123 \
+          -Dspring.profiles.active=test \
+          -Dlogging.level.com.desafios.admision_mtn=WARN \
+          > backend.log 2>&1 &
+        
+        # Wait for application to start
+        echo "Waiting for backend to be ready..."
+        timeout=120
+        while [ $timeout -gt 0 ]; do
+          if curl -s http://localhost:8080/actuator/health > /dev/null; then
+            echo "Backend is ready!"
+            break
+          fi
+          echo "Waiting... ($timeout seconds left)"
+          sleep 2
+          timeout=$((timeout - 2))
+        done
+        
+        if [ $timeout -eq 0 ]; then
+          echo "Backend failed to start within timeout"
+          cat backend.log
+          exit 1
+        fi
+
+    - name: 🩺 Health Check
+      run: |
+        curl -f http://localhost:8080/actuator/health
+        curl -f http://localhost:8080/actuator/info
+
+    - name: 📚 Generate Documentation
+      run: |
+        # Export OpenAPI
+        chmod +x tools/export-openapi.sh
+        ./tools/export-openapi.sh
+        
+        # Verify documentation files exist
+        ls -la docs/
+
+    - name: 🧪 Run E2E API Tests
+      run: |
+        mvn test -Dtest="e2e.**" \
+          -Dspring.profiles.active=test \
+          -Dlogging.level.com.desafios.admision_mtn=WARN
+
+    - name: 📊 Test Results
+      uses: dorny/test-reporter@v1
+      if: success() || failure()
+      with:
+        name: Backend E2E Tests
+        path: target/surefire-reports/*.xml
+        reporter: java-junit
+
+    - name: 📦 Upload Artifacts
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: preflight-artifacts
+        path: |
+          docs/
+          target/surefire-reports/
+          backend.log
+        retention-days: 30
+
+    - name: 🔍 Debug on Failure
+      if: failure()
+      run: |
+        echo "=== Backend Logs ==="
+        cat backend.log
+        
+        echo "=== Database Status ==="
+        PGPASSWORD=admin123 psql -h localhost -U admin -d "Admisión_MTN_DB" -c "\dt"
+        
+        echo "=== Application Status ==="
+        curl -v http://localhost:8080/actuator/health || true
+
+  frontend-e2e:
+    runs-on: ubuntu-latest
+    needs: preflight
+    if: always() && needs.preflight.result == 'success'
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: Admisión_MTN_DB
+          POSTGRES_USER: admin
+          POSTGRES_PASSWORD: admin123
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - name: 🛒 Checkout code
+      uses: actions/checkout@v4
+
+    - name: ☕ Set up Java 17
+      uses: actions/setup-java@v3
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: maven
+
+    - name: 🟢 Set up Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: '../Admision_MTN_front/package-lock.json'
+
+    - name: 🔧 Setup Environment
+      run: |
+        # Setup database
+        PGPASSWORD=admin123 psql -h localhost -U admin -d "Admisión_MTN_DB" -c "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";"
+        
+        # Setup backend
+        mvn clean compile -DskipTests
+        
+        # Start backend
+        nohup mvn spring-boot:run \
+          -Dspring.datasource.url="jdbc:postgresql://localhost:5432/Admisión_MTN_DB" \
+          -Dspring.datasource.username=admin \
+          -Dspring.datasource.password=admin123 \
+          -Dspring.profiles.active=test \
+          > backend.log 2>&1 &
+
+    - name: 📦 Install Frontend Dependencies
+      run: |
+        if [ -d "../Admision_MTN_front" ]; then
+          cd "../Admision_MTN_front"
+          npm ci
+          npx playwright install --with-deps
+        else
+          echo "Frontend directory not found, skipping frontend tests"
+          exit 0
+        fi
+
+    - name: 🚀 Start Frontend Application
+      run: |
+        if [ -d "../Admision_MTN_front" ]; then
+          cd "../Admision_MTN_front"
+          nohup npm run dev > frontend.log 2>&1 &
+          
+          # Wait for frontend
+          timeout=60
+          while [ $timeout -gt 0 ]; do
+            if curl -s http://localhost:5173 > /dev/null; then
+              echo "Frontend is ready!"
+              break
+            fi
+            sleep 2
+            timeout=$((timeout - 2))
+          done
+        fi
+
+    - name: ⏳ Wait for Services
+      run: |
+        # Wait for backend
+        timeout=120
+        while [ $timeout -gt 0 ]; do
+          if curl -s http://localhost:8080/actuator/health > /dev/null; then
+            echo "Backend ready!"
+            break
+          fi
+          sleep 2
+          timeout=$((timeout - 2))
+        done
+
+    - name: 🎭 Run Playwright E2E Tests
+      run: |
+        if [ -d "../Admision_MTN_front" ]; then
+          cd "../Admision_MTN_front"
+          npm run e2e
+        else
+          echo "Frontend not available, skipping Playwright tests"
+        fi
+
+    - name: 📊 Upload Playwright Report
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: playwright-report
+        path: ../Admision_MTN_front/playwright-report/
+        retention-days: 30
+
+  postman-tests:
+    runs-on: ubuntu-latest
+    needs: preflight
+    if: always() && needs.preflight.result == 'success'
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: Admisión_MTN_DB
+          POSTGRES_USER: admin
+          POSTGRES_PASSWORD: admin123
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - name: 🛒 Checkout code
+      uses: actions/checkout@v4
+
+    - name: ☕ Set up Java 17
+      uses: actions/setup-java@v3
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: maven
+
+    - name: 🟢 Set up Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+
+    - name: 📮 Install Newman
+      run: npm install -g newman
+
+    - name: 🔧 Setup and Start Backend
+      run: |
+        # Setup database
+        PGPASSWORD=admin123 psql -h localhost -U admin -d "Admisión_MTN_DB" -c "CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";"
+        
+        # Create test users
+        if [ -f "src/test/resources/e2e-fixtures/test-users.sql" ]; then
+          PGPASSWORD=admin123 psql -h localhost -U admin -d "Admisión_MTN_DB" -f "src/test/resources/e2e-fixtures/test-users.sql"
+        fi
+        
+        # Build and start
+        mvn clean compile -DskipTests
+        nohup mvn spring-boot:run \
+          -Dspring.datasource.url="jdbc:postgresql://localhost:5432/Admisión_MTN_DB" \
+          -Dspring.datasource.username=admin \
+          -Dspring.datasource.password=admin123 \
+          -Dspring.profiles.active=test \
+          > backend.log 2>&1 &
+        
+        # Wait for backend
+        timeout=120
+        while [ $timeout -gt 0 ]; do
+          if curl -s http://localhost:8080/actuator/health > /dev/null; then
+            break
+          fi
+          sleep 2
+          timeout=$((timeout - 2))
+        done
+
+    - name: 📮 Run Postman Collection
+      run: |
+        newman run tests/postman/MTN_Preflight.postman_collection.json \
+          -e tests/postman/MTN_env_local.postman_environment.json \
+          --reporters cli,json,junit \
+          --reporter-junit-export newman-results.xml \
+          --reporter-json-export newman-results.json
+
+    - name: 📊 Upload Newman Results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: newman-results
+        path: |
+          newman-results.xml
+          newman-results.json
+        retention-days: 30

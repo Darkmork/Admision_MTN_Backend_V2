@@ -1,0 +1,96 @@
+{{- if .Values.tests.enabled }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ include "<service>.fullname" . }}-test"
+  labels:
+    {{- include "<service>.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-weight": "1"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  containers:
+    - name: test-connection
+      image: "{{ .Values.tests.image.registry }}/{{ .Values.tests.image.repository }}:{{ .Values.tests.image.tag }}"
+      command: ['/bin/sh']
+      args:
+        - -c
+        - |
+          set -ex
+          
+          echo "Testing service connectivity..."
+          
+          # Test health endpoint
+          echo "Testing health endpoint..."
+          if curl -f http://{{ include "<service>.fullname" . }}:{{ .Values.service.port }}/actuator/health; then
+            echo "✓ Health endpoint is accessible"
+          else
+            echo "✗ Health endpoint failed"
+            exit 1
+          fi
+          
+          # Test info endpoint
+          echo "Testing info endpoint..."
+          if curl -f http://{{ include "<service>.fullname" . }}:{{ .Values.service.port }}/actuator/info; then
+            echo "✓ Info endpoint is accessible"
+          else
+            echo "✗ Info endpoint failed"
+            exit 1
+          fi
+          
+          # Test metrics endpoint (if monitoring is enabled)
+          {{- if .Values.monitoring.enabled }}
+          echo "Testing metrics endpoint..."
+          if curl -f http://{{ include "<service>.fullname" . }}:{{ .Values.service.port }}/actuator/metrics; then
+            echo "✓ Metrics endpoint is accessible"
+          else
+            echo "✗ Metrics endpoint failed"
+            exit 1
+          fi
+          
+          echo "Testing Prometheus metrics endpoint..."
+          if curl -f http://{{ include "<service>.fullname" . }}:{{ .Values.service.port }}/actuator/prometheus; then
+            echo "✓ Prometheus metrics endpoint is accessible"
+          else
+            echo "✗ Prometheus metrics endpoint failed"
+            exit 1
+          fi
+          {{- end }}
+          
+          # Test readiness endpoint
+          echo "Testing readiness endpoint..."
+          if curl -f http://{{ include "<service>.fullname" . }}:{{ .Values.service.port }}/actuator/health/readiness; then
+            echo "✓ Readiness endpoint is accessible"
+          else
+            echo "✗ Readiness endpoint failed"
+            exit 1
+          fi
+          
+          # Test liveness endpoint
+          echo "Testing liveness endpoint..."
+          if curl -f http://{{ include "<service>.fullname" . }}:{{ .Values.service.port }}/actuator/health/liveness; then
+            echo "✓ Liveness endpoint is accessible"
+          else
+            echo "✗ Liveness endpoint failed"
+            exit 1
+          fi
+          
+          echo "All tests passed! Service is healthy and accessible."
+          
+      resources:
+        {{- toYaml .Values.tests.resources | nindent 8 }}
+      env:
+        - name: SERVICE_NAME
+          value: {{ include "<service>.fullname" . }}
+        - name: SERVICE_PORT
+          value: "{{ .Values.service.port }}"
+        - name: NAMESPACE
+          value: {{ .Release.Namespace }}
+        - name: RELEASE_NAME
+          value: {{ .Release.Name }}
+        - name: TEST_TIMEOUT
+          value: "60"
+{{- end }}

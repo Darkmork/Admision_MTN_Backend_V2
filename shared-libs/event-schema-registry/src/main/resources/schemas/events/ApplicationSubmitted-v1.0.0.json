@@ -1,0 +1,295 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.mtn.cl/events/ApplicationSubmitted/v1.0.0",
+  "title": "ApplicationSubmitted Event",
+  "description": "Event published when a new application is submitted to the admission system",
+  "type": "object",
+  "required": [
+    "eventId",
+    "eventType", 
+    "eventVersion",
+    "timestamp",
+    "source",
+    "data"
+  ],
+  "properties": {
+    "eventId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this event instance"
+    },
+    "eventType": {
+      "type": "string",
+      "const": "ApplicationSubmitted",
+      "description": "Type of event - always 'ApplicationSubmitted'"
+    },
+    "eventVersion": {
+      "type": "string",
+      "const": "1.0.0",
+      "description": "Version of this event schema"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the application was submitted"
+    },
+    "source": {
+      "type": "string",
+      "const": "application-service",
+      "description": "Source service that published this event"
+    },
+    "correlationId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Correlation ID for distributed tracing"
+    },
+    "causationId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "ID of the command that caused this event"
+    },
+    "data": {
+      "type": "object",
+      "required": [
+        "applicationId",
+        "studentId",
+        "applicantUserId",
+        "submissionDate",
+        "targetSchool",
+        "academicYear",
+        "educationalLevel"
+      ],
+      "properties": {
+        "applicationId": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Unique identifier of the application"
+        },
+        "studentId": {
+          "type": "string",
+          "format": "uuid", 
+          "description": "Unique identifier of the student"
+        },
+        "applicantUserId": {
+          "type": "string",
+          "format": "uuid",
+          "description": "User ID of the family member who submitted"
+        },
+        "submissionDate": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the application was submitted"
+        },
+        "targetSchool": {
+          "type": "string",
+          "enum": ["MONTE_TABOR", "NAZARET"],
+          "description": "School the student is applying to"
+        },
+        "academicYear": {
+          "type": "integer",
+          "minimum": 2024,
+          "maximum": 2030,
+          "description": "Academic year for admission"
+        },
+        "educationalLevel": {
+          "type": "string",
+          "enum": ["PRESCHOOL", "BASIC", "HIGH_SCHOOL"],
+          "description": "Educational level the student is applying to"
+        },
+        "studentDetails": {
+          "type": "object",
+          "required": ["firstName", "lastName", "birthDate"],
+          "properties": {
+            "firstName": {
+              "type": "string",
+              "minLength": 2,
+              "maxLength": 50,
+              "description": "Student's first name"
+            },
+            "lastName": {
+              "type": "string", 
+              "minLength": 2,
+              "maxLength": 50,
+              "description": "Student's last name"
+            },
+            "motherLastName": {
+              "type": "string",
+              "maxLength": 50,
+              "description": "Student's mother's last name"
+            },
+            "birthDate": {
+              "type": "string",
+              "format": "date",
+              "description": "Student's birth date"
+            },
+            "rut": {
+              "type": "string",
+              "pattern": "^\\d{7,8}-[0-9K]$",
+              "description": "Chilean national ID (RUT)"
+            },
+            "gender": {
+              "type": "string",
+              "enum": ["MALE", "FEMALE", "OTHER"],
+              "description": "Student's gender"
+            },
+            "nationality": {
+              "type": "string",
+              "maxLength": 50,
+              "description": "Student's nationality"
+            }
+          }
+        },
+        "familyContact": {
+          "type": "object",
+          "required": ["email", "phone"],
+          "properties": {
+            "email": {
+              "type": "string",
+              "format": "email",
+              "description": "Primary family contact email"
+            },
+            "phone": {
+              "type": "string",
+              "pattern": "^\\+56[0-9]{8,9}$",
+              "description": "Chilean phone number"
+            },
+            "address": {
+              "type": "string",
+              "maxLength": 200,
+              "description": "Family address"
+            },
+            "city": {
+              "type": "string",
+              "maxLength": 50,
+              "description": "City of residence"
+            },
+            "region": {
+              "type": "string",
+              "maxLength": 50,
+              "description": "Region of residence"
+            }
+          }
+        },
+        "specialCategories": {
+          "type": "object",
+          "properties": {
+            "isEmployeeChild": {
+              "type": "boolean",
+              "description": "Whether student is child of school employee"
+            },
+            "employeeParentName": {
+              "type": "string",
+              "maxLength": 100,
+              "description": "Name of employee parent if applicable"
+            },
+            "isAlumniChild": {
+              "type": "boolean",
+              "description": "Whether student is child of alumni"
+            },
+            "alumniParentYear": {
+              "type": "integer",
+              "minimum": 1950,
+              "maximum": 2030,
+              "description": "Graduation year of alumni parent"
+            },
+            "isInclusionStudent": {
+              "type": "boolean",
+              "description": "Whether student requires special inclusion support"
+            },
+            "inclusionType": {
+              "type": "string",
+              "maxLength": 100,
+              "description": "Type of inclusion support needed"
+            }
+          }
+        },
+        "applicationPriority": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10,
+          "default": 5,
+          "description": "Processing priority (1=highest, 10=lowest)"
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Additional event metadata",
+      "properties": {
+        "source": {
+          "type": "string",
+          "description": "Source component or user that triggered the event"
+        },
+        "traceId": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Distributed tracing ID"
+        },
+        "sessionId": {
+          "type": "string",
+          "format": "uuid", 
+          "description": "User session ID"
+        },
+        "userAgent": {
+          "type": "string",
+          "description": "Browser/client user agent"
+        },
+        "ipAddress": {
+          "type": "string",
+          "format": "ipv4",
+          "description": "Client IP address"
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "eventId": "550e8400-e29b-41d4-a716-446655440000",
+      "eventType": "ApplicationSubmitted",
+      "eventVersion": "1.0.0",
+      "timestamp": "2024-03-15T10:30:00Z",
+      "source": "application-service",
+      "correlationId": "123e4567-e89b-12d3-a456-426614174000",
+      "causationId": "789e0123-e45b-67c8-d901-234567890123",
+      "data": {
+        "applicationId": "app-550e8400-e29b-41d4-a716-446655440001",
+        "studentId": "student-550e8400-e29b-41d4-a716-446655440002", 
+        "applicantUserId": "user-550e8400-e29b-41d4-a716-446655440003",
+        "submissionDate": "2024-03-15T10:30:00Z",
+        "targetSchool": "MONTE_TABOR",
+        "academicYear": 2025,
+        "educationalLevel": "BASIC",
+        "studentDetails": {
+          "firstName": "María José",
+          "lastName": "González",
+          "motherLastName": "Silva",
+          "birthDate": "2015-08-20",
+          "rut": "12345678-9",
+          "gender": "FEMALE",
+          "nationality": "Chilena"
+        },
+        "familyContact": {
+          "email": "familia.gonzalez@email.cl",
+          "phone": "+56912345678",
+          "address": "Avenida Providencia 1234",
+          "city": "Santiago",
+          "region": "Metropolitana"
+        },
+        "specialCategories": {
+          "isEmployeeChild": false,
+          "isAlumniChild": true,
+          "alumniParentYear": 2002,
+          "isInclusionStudent": false
+        },
+        "applicationPriority": 5
+      },
+      "metadata": {
+        "source": "web-application",
+        "traceId": "trace-550e8400-e29b-41d4-a716-446655440004",
+        "sessionId": "session-550e8400-e29b-41d4-a716-446655440005",
+        "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "ipAddress": "192.168.1.100"
+      }
+    }
+  ]
+}

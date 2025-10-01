@@ -1,0 +1,365 @@
+# MTN Admission API Gateway Configuration
+# Security-first configuration with OIDC, mTLS, Rate Limiting, and CORS
+
+spring:
+  application:
+    name: mtn-api-gateway
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:production}
+  
+  # Redis configuration for rate limiting
+  data:
+    redis:
+      host: ${REDIS_HOST:redis.infrastructure.svc.cluster.local}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      database: ${REDIS_DATABASE:0}
+      timeout: 5000ms
+      lettuce:
+        pool:
+          max-active: 10
+          max-wait: -1ms
+          max-idle: 8
+          min-idle: 0
+
+  # OAuth2 Resource Server Configuration (Keycloak OIDC)
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${OIDC_ISSUER:https://auth.mtn.cl/realms/mtn-admision}
+          jwk-set-uri: ${OIDC_JWKS_URI:https://auth.mtn.cl/realms/mtn-admision/protocol/openid-connect/certs}
+          jws-algorithms: RS256
+          # Clock skew tolerance for distributed systems
+          clock-skew: 60s
+          cache-duration: 300s
+
+  # Spring Cloud Gateway Configuration
+  cloud:
+    gateway:
+      # Default filters applied to all routes
+      default-filters:
+        - TokenRelay=
+        - RemoveRequestHeader=Cookie
+        - DedupeResponseHeader=Access-Control-Allow-Credentials Access-Control-Allow-Origin
+        - name: AddRequestHeader
+          args:
+            name: X-Gateway-Source
+            value: mtn-api-gateway
+        - name: AddRequestHeader
+          args:
+            name: X-Request-ID
+            value: "#{T(java.util.UUID).randomUUID().toString()}"
+      
+      # Route definitions with security and rate limiting
+      routes:
+        # User Management Routes (Admin/Coordinator only)
+        - id: users-admin
+          uri: ${USERS_UPSTREAM:lb://user-service}
+          predicates:
+            - Path=/api/users/admin/**
+            - Method=GET,POST,PUT,DELETE
+          filters:
+            - StripPrefix=1
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 10    # 10 req/min for admin operations
+                redis-rate-limiter.burstCapacity: 20
+                key-resolver: "#{@principalOrIpKeyResolver}"
+            - name: CircuitBreaker
+              args:
+                name: users-admin-cb
+                fallbackUri: forward:/fallback/users-admin
+            - name: SecureHeaders
+
+        # User Profile Routes (All authenticated users)
+        - id: users-profile
+          uri: ${USERS_UPSTREAM:lb://user-service}
+          predicates:
+            - Path=/api/users/me,/api/users/profile/**
+            - Method=GET,PUT,PATCH
+          filters:
+            - StripPrefix=1
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 30    # 30 req/min for profile operations
+                redis-rate-limiter.burstCapacity: 60
+                key-resolver: "#{@principalOrIpKeyResolver}"
+            - name: SecureHeaders
+
+        # Applications Routes (Role-based access)
+        - id: applications-submit
+          uri: ${APPLICATIONS_UPSTREAM:lb://application-service}
+          predicates:
+            - Path=/api/applications/submit,/api/applications/*/documents/**
+            - Method=POST,PUT
+          filters:
+            - StripPrefix=1
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 20    # 20 req/min for submissions
+                redis-rate-limiter.burstCapacity: 40
+                key-resolver: "#{@principalOrIpKeyResolver}"
+            - name: SecureHeaders
+
+        - id: applications-admin
+          uri: ${APPLICATIONS_UPSTREAM:lb://application-service}
+          predicates:
+            - Path=/api/applications/*/state-changes,/api/applications/admin/**
+            - Method=POST,PUT,PATCH,DELETE
+          filters:
+            - StripPrefix=1
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 15    # 15 req/min for admin changes
+                redis-rate-limiter.burstCapacity: 30
+                key-resolver: "#{@principalOrIpKeyResolver}"
+            - name: SecureHeaders
+
+        - id: applications-read
+          uri: ${APPLICATIONS_UPSTREAM:lb://application-service}
+          predicates:
+            - Path=/api/applications/**
+            - Method=GET
+          filters:
+            - StripPrefix=1
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 60    # 60 req/min for reading
+                redis-rate-limiter.burstCapacity: 120
+                key-resolver: "#{@principalOrIpKeyResolver}"
+            - name: SecureHeaders
+
+        # Evaluation Routes
+        - id: evaluations-interviews
+          uri: ${EVALUATIONS_UPSTREAM:lb://evaluation-service}
+          predicates:
+            - Path=/api/interviews/**
+            - Method=GET,POST,PUT,PATCH
+          filters:
+            - StripPrefix=1
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 20    # 20 req/min for interviews
+                redis-rate-limiter.burstCapacity: 40
+                key-resolver: "#{@principalOrIpKeyResolver}"
+            - name: SecureHeaders
+
+        - id: evaluations-scores
+          uri: ${EVALUATIONS_UPSTREAM:lb://evaluation-service}
+          predicates:
+            - Path=/api/evaluations/*/scores
+            - Method=POST,PUT,PATCH
+          filters:
+            - StripPrefix=1
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 30    # 30 req/min for scoring
+                redis-rate-limiter.burstCapacity: 60
+                key-resolver: "#{@principalOrIpKeyResolver}"
+            - name: SecureHeaders
+
+        - id: evaluations-read
+          uri: ${EVALUATIONS_UPSTREAM:lb://evaluation-service}
+          predicates:
+            - Path=/api/evaluations/**
+            - Method=GET
+          filters:
+            - StripPrefix=1
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 40    # 40 req/min for reading evaluations
+                redis-rate-limiter.burstCapacity: 80
+                key-resolver: "#{@principalOrIpKeyResolver}"
+            - name: SecureHeaders
+
+        # Notification Routes (Admin only)
+        - id: notifications-admin
+          uri: ${NOTIFICATIONS_UPSTREAM:lb://notification-service}
+          predicates:
+            - Path=/api/notifications/admin/**
+            - Method=GET,POST,PUT,DELETE
+          filters:
+            - StripPrefix=1
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 10    # 10 req/min for admin notifications
+                redis-rate-limiter.burstCapacity: 20
+                key-resolver: "#{@principalOrIpKeyResolver}"
+            - name: SecureHeaders
+
+        # Public Routes (Higher rate limits, no auth required)
+        - id: public-info
+          uri: ${APPLICATIONS_UPSTREAM:lb://application-service}
+          predicates:
+            - Path=/api/applications/public/**,/api/info/**
+            - Method=GET
+          filters:
+            - StripPrefix=1
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 100   # 100 req/min for public info
+                redis-rate-limiter.burstCapacity: 200
+                key-resolver: "#{@ipKeyResolver}"
+            - name: SecureHeaders
+
+        # Health Check Routes
+        - id: health-checks
+          uri: ${HEALTH_UPSTREAM:lb://application-service}
+          predicates:
+            - Path=/actuator/health,/actuator/info
+            - Method=GET
+          filters:
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 20    # 20 req/min for health checks
+                redis-rate-limiter.burstCapacity: 40
+                key-resolver: "#{@ipKeyResolver}"
+            - name: SecureHeaders
+
+      # Global CORS Configuration
+      globalcors:
+        corsConfigurations:
+          "[/api/**]":
+            allowedOrigins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173,http://localhost:5174,http://localhost:5175,http://localhost:5176,http://localhost:5177,https://admision.mtn.cl,https://admin.mtn.cl,https://app-staging.mtn.cl}
+            allowedMethods: [GET, POST, PUT, PATCH, DELETE, OPTIONS]
+            allowedHeaders: 
+              - Authorization
+              - Content-Type
+              - X-Requested-With
+              - X-Request-ID
+              - X-Correlation-ID
+              - Accept
+              - Origin
+              - User-Agent
+            exposedHeaders:
+              - X-Request-ID
+              - X-Rate-Limit-Remaining
+              - X-Rate-Limit-Retry-After
+            allowCredentials: true
+            maxAge: 3600
+          "[/actuator/**]":
+            allowedOrigins: ${MONITORING_CORS_ORIGINS:https://grafana.mtn.cl,https://prometheus.mtn.cl}
+            allowedMethods: [GET]
+            allowedHeaders: [Authorization, Content-Type]
+            allowCredentials: false
+            maxAge: 86400
+
+      # Discovery Configuration
+      discovery:
+        locator:
+          enabled: true
+          lower-case-service-id: true
+
+# Actuator Configuration for Monitoring
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics,gateway
+      cors:
+        allowed-origins: ${MONITORING_CORS_ORIGINS:https://grafana.mtn.cl}
+        allowed-methods: GET
+        allowed-headers: "*"
+  endpoint:
+    health:
+      show-details: when-authorized
+      show-components: when-authorized
+    gateway:
+      enabled: true
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+    tags:
+      application: ${spring.application.name}
+      environment: ${ENVIRONMENT:production}
+      region: ${AWS_REGION:us-east-1}
+
+# Logging Configuration
+logging:
+  level:
+    org.springframework.cloud.gateway: ${GATEWAY_LOG_LEVEL:INFO}
+    org.springframework.security: ${SECURITY_LOG_LEVEL:INFO}
+    org.springframework.web.cors: DEBUG
+    reactor.netty.http.client: ${HTTP_CLIENT_LOG_LEVEL:WARN}
+    com.mtn.admission.gateway: DEBUG
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level [%X{correlationId:-}] %logger{50} - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level [%X{correlationId:-}] [%X{traceId:-}] [%X{spanId:-}] %logger{50} - %msg%n"
+
+# Resilience4j Configuration
+resilience4j:
+  circuitbreaker:
+    instances:
+      users-admin-cb:
+        registerHealthIndicator: true
+        slidingWindowSize: 10
+        minimumNumberOfCalls: 5
+        permittedNumberOfCallsInHalfOpenState: 3
+        automaticTransitionFromOpenToHalfOpenEnabled: true
+        waitDurationInOpenState: 30s
+        failureRateThreshold: 60
+        eventConsumerBufferSize: 10
+      applications-cb:
+        registerHealthIndicator: true
+        slidingWindowSize: 20
+        minimumNumberOfCalls: 10
+        permittedNumberOfCallsInHalfOpenState: 5
+        automaticTransitionFromOpenToHalfOpenEnabled: true
+        waitDurationInOpenState: 60s
+        failureRateThreshold: 50
+        eventConsumerBufferSize: 10
+  timelimiter:
+    instances:
+      users-admin-cb:
+        timeoutDuration: 30s
+      applications-cb:
+        timeoutDuration: 45s
+
+# Security Configuration
+security:
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:https://admision.mtn.cl,https://admin.mtn.cl}
+    max-age: 3600
+  rate-limiting:
+    default-replenish-rate: 60
+    default-burst-capacity: 120
+    admin-replenish-rate: 10
+    admin-burst-capacity: 20
+  headers:
+    content-security-policy: "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self' https://auth.mtn.cl; frame-ancestors 'none';"
+    strict-transport-security: "max-age=31536000; includeSubDomains; preload"
+    x-content-type-options: "nosniff"
+    x-frame-options: "DENY"
+    x-xss-protection: "1; mode=block"
+    referrer-policy: "strict-origin-when-cross-origin"
+
+# Service Discovery Configuration
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_URL:http://eureka.infrastructure.svc.cluster.local:8761/eureka/}
+    register-with-eureka: true
+    fetch-registry: true
+  instance:
+    prefer-ip-address: true
+    lease-renewal-interval-in-seconds: 30
+    lease-expiration-duration-in-seconds: 90
+    metadata-map:
+      zone: ${AVAILABILITY_ZONE:us-east-1a}
+      profile: ${spring.profiles.active}
+      version: ${BUILD_VERSION:1.0.0}
+
+# OpenTelemetry Configuration
+otel:
+  service:
+    name: mtn-api-gateway
+  exporter:
+    jaeger:
+      endpoint: ${JAEGER_ENDPOINT:http://jaeger.monitoring.svc.cluster.local:14250}
+  resource:
+    attributes:
+      service.namespace: mtn-admission
+      service.version: ${BUILD_VERSION:1.0.0}
+      deployment.environment: ${ENVIRONMENT:production}

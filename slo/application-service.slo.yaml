@@ -1,0 +1,135 @@
+version: "prometheus/v1"
+service: "application-service"
+labels:
+  team: "backend"
+  environment: "production"
+  component: "applications"
+  
+slos:
+  # Latency SLO - 99% of requests should complete in <2s
+  - name: "requests-latency"
+    objective: 99
+    description: "99% of application service HTTP requests should complete in less than 2 seconds"
+    sli:
+      events:
+        error_query: sum(rate(http_server_requests_seconds_count{app="application-service", le!="2"}[5m]))
+        total_query: sum(rate(http_server_requests_seconds_count{app="application-service"}[5m]))
+    alerting:
+      name: ApplicationServiceLatency
+      labels:
+        category: latency
+        service: application-service
+      annotations:
+        summary: "Application Service latency SLO violation"
+        runbook: "https://runbooks.mtn.cl/slo/application-service-latency"
+      page_alert:
+        labels:
+          severity: page
+          team: backend
+        annotations:
+          summary: "Application Service latency SLO burn rate is critical"
+          description: "Application processing and document upload operations are slow"
+          impact: "Families experiencing delays in application submission and document uploads"
+          action: "Check file storage performance, review database queries, verify document processing pipeline"
+      ticket_alert:
+        labels:
+          severity: ticket
+          team: backend
+        annotations:
+          summary: "Application Service latency trending towards SLO violation"
+
+  # Availability SLO - 95% of requests should be successful
+  - name: "requests-availability"
+    objective: 95
+    description: "95% of application service HTTP requests should be successful (status code <500)"
+    sli:
+      events:
+        error_query: sum(rate(http_server_requests_seconds_count{app="application-service",status=~"5.."}[5m]))
+        total_query: sum(rate(http_server_requests_seconds_count{app="application-service"}[5m]))
+    alerting:
+      name: ApplicationServiceAvailability
+      labels:
+        category: availability
+        service: application-service
+      annotations:
+        summary: "Application Service availability SLO violation"
+        runbook: "https://runbooks.mtn.cl/slo/application-service-availability"
+      page_alert:
+        labels:
+          severity: page
+          team: backend
+        annotations:
+          summary: "Application Service availability SLO burn rate is critical"
+          description: "Application service experiencing high error rates"
+          impact: "Families cannot submit applications or upload required documents"
+          action: "IMMEDIATE: Check database connectivity, verify file storage, review document validation logic"
+      ticket_alert:
+        labels:
+          severity: ticket
+          team: backend
+        annotations:
+          summary: "Application Service availability requires investigation"
+
+  # Application Submission Success Rate SLO - 98% of submissions should succeed
+  - name: "application-submission-success"
+    objective: 98
+    description: "98% of application submissions should be successful"
+    sli:
+      events:
+        error_query: sum(rate(application_submissions_total{app="application-service",status!="success"}[5m]))
+        total_query: sum(rate(application_submissions_total{app="application-service"}[5m]))
+    alerting:
+      name: ApplicationSubmissionSuccess
+      labels:
+        category: business_logic
+        service: application-service
+      annotations:
+        summary: "Application submission success rate SLO violation"
+        runbook: "https://runbooks.mtn.cl/slo/application-submission-success"
+      page_alert:
+        labels:
+          severity: page
+          team: backend
+        annotations:
+          summary: "Application submission failure rate is critical"
+          description: "High number of application submission failures"
+          impact: "Families cannot complete the admission application process"
+          action: "Check form validation logic, verify required documents processing, review database constraints"
+      ticket_alert:
+        labels:
+          severity: ticket
+          team: backend
+        annotations:
+          summary: "Application submission success rate trending down"
+
+  # Document Upload Success Rate SLO - 97% of uploads should succeed
+  - name: "document-upload-success"
+    objective: 97
+    description: "97% of document uploads should be successful"
+    sli:
+      events:
+        error_query: sum(rate(document_uploads_total{app="application-service",status!="success"}[5m]))
+        total_query: sum(rate(document_uploads_total{app="application-service"}[5m]))
+    alerting:
+      name: DocumentUploadSuccess
+      labels:
+        category: business_logic
+        service: application-service
+      annotations:
+        summary: "Document upload success rate SLO violation"
+        runbook: "https://runbooks.mtn.cl/slo/document-upload-success"
+      page_alert:
+        labels:
+          severity: page
+          team: backend
+        annotations:
+          summary: "Document upload failure rate is critical"
+          description: "High number of document upload failures"
+          impact: "Families cannot upload required documents for applications"
+          action: "Check file storage service, verify file size limits, review virus scanning pipeline"
+      ticket_alert:
+        labels:
+          severity: ticket
+          team: backend
+        annotations:
+          summary: "Document upload success rate trending down"

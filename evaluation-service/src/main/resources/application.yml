@@ -1,0 +1,447 @@
+spring:
+  application:
+    name: evaluation-service
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:dev}
+  
+  # Database Configuration
+  datasource:
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/Admisión_MTN_DB}
+    username: ${DATABASE_USERNAME:admin}
+    password: ${DATABASE_PASSWORD:admin123}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: ${DATABASE_POOL_SIZE:10}
+      minimum-idle: ${DATABASE_MIN_IDLE:2}
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+      leak-detection-threshold: 60000
+      pool-name: EvaluationServiceHikariCP
+  
+  # JPA Configuration
+  jpa:
+    hibernate:
+      ddl-auto: validate
+      naming:
+        physical-strategy: org.hibernate.boot.model.naming.CamelCaseToUnderscoresNamingStrategy
+    show-sql: ${JPA_SHOW_SQL:false}
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+        use_sql_comments: true
+        jdbc:
+          batch_size: 20
+          order_inserts: true
+          order_updates: true
+          batch_versioned_data: true
+        connection:
+          provider_disables_autocommit: true
+        query:
+          in_clause_parameter_padding: true
+        temp:
+          use_jdbc_metadata_defaults: false
+    database: postgresql
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+  
+  # Flyway Configuration
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    validate-on-migrate: true
+    out-of-order: false
+    locations: classpath:db/migration
+    default-schema: public
+    table: flyway_schema_history_evaluations
+  
+  # RabbitMQ Configuration
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USERNAME:guest}
+    password: ${RABBITMQ_PASSWORD:guest}
+    virtual-host: ${RABBITMQ_VHOST:/}
+    connection-timeout: 30s
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    template:
+      retry:
+        enabled: true
+        initial-interval: 1s
+        max-attempts: 3
+        multiplier: 2.0
+        max-interval: 10s
+    listener:
+      simple:
+        retry:
+          enabled: true
+          initial-interval: 1s
+          max-attempts: 3
+          multiplier: 2.0
+          max-interval: 10s
+        default-requeue-rejected: false
+        prefetch: 5
+        concurrency: 2
+        max-concurrency: 10
+        acknowledge-mode: auto
+  
+  # Security Configuration
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${KEYCLOAK_ISSUER_URI:http://localhost:8080/realms/mtn-admission}
+          jwk-set-uri: ${KEYCLOAK_JWK_SET_URI:http://localhost:8080/realms/mtn-admission/protocol/openid-connect/certs}
+  
+  # Cache Configuration
+  cache:
+    type: simple
+    cache-names:
+      - evaluators
+      - rubrics
+      - assignments
+  
+  # Jackson Configuration
+  jackson:
+    time-zone: America/Santiago
+    date-format: yyyy-MM-dd'T'HH:mm:ss.SSSXXX
+    serialization:
+      write-dates-as-timestamps: false
+      write-durations-as-timestamps: false
+    deserialization:
+      adjust-dates-to-context-time-zone: false
+      fail-on-unknown-properties: false
+
+# Server Configuration
+server:
+  port: ${SERVER_PORT:8084}
+  servlet:
+    context-path: /
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
+  error:
+    include-message: always
+    include-binding-errors: always
+    include-stacktrace: on_param
+    include-exception: false
+  shutdown: graceful
+  compression:
+    enabled: true
+    mime-types: text/html,text/xml,text/plain,text/css,text/javascript,application/javascript,application/json
+    min-response-size: 1024
+
+# Eureka Configuration
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_DEFAULT_ZONE:http://localhost:8761/eureka/}
+    register-with-eureka: true
+    fetch-registry: true
+    registry-fetch-interval-seconds: 5
+    eureka-service-url-poll-interval-seconds: 300
+    instance-info-replication-interval-seconds: 10
+  instance:
+    instance-id: ${spring.application.name}:${vcap.application.instance_id:${spring.application.instance_id:${random.value}}}
+    hostname: ${HOSTNAME:localhost}
+    prefer-ip-address: true
+    lease-renewal-interval-in-seconds: 5
+    lease-expiration-duration-in-seconds: 10
+    metadata-map:
+      zone: ${EUREKA_ZONE:zone1}
+      profile: ${spring.profiles.active}
+      version: ${project.version:1.0.0}
+      git.commit: ${GIT_COMMIT:unknown}
+      git.branch: ${GIT_BRANCH:unknown}
+
+# Management & Actuator Configuration
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus,openapi,swagger-ui
+      base-path: /actuator
+      cors:
+        allowed-origins: "*"
+        allowed-methods: GET,POST
+  endpoint:
+    health:
+      show-details: when-authorized
+      show-components: when-authorized
+      probes:
+        enabled: true
+    metrics:
+      enabled: true
+    prometheus:
+      enabled: true
+  health:
+    rabbit:
+      enabled: true
+    db:
+      enabled: true
+    diskspace:
+      enabled: true
+      threshold: 100MB
+  info:
+    env:
+      enabled: true
+    java:
+      enabled: true
+    os:
+      enabled: true
+    git:
+      enabled: true
+      mode: full
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+        evaluation.processing.time: true
+        interview.processing.time: true
+      percentiles:
+        http.server.requests: 0.5,0.9,0.95,0.99
+        evaluation.processing.time: 0.5,0.9,0.95,0.99
+        interview.processing.time: 0.5,0.9,0.95,0.99
+    tags:
+      application: ${spring.application.name}
+      service: evaluation-service
+      environment: ${ENVIRONMENT:dev}
+    export:
+      prometheus:
+        enabled: true
+        step: 30s
+        descriptions: true
+        histogram-flavor: prometheus
+
+# OpenTelemetry Configuration
+management:
+  tracing:
+    enabled: true
+    sampling:
+      probability: ${TRACING_SAMPLING_PROBABILITY:0.1}
+  zipkin:
+    tracing:
+      endpoint: ${ZIPKIN_ENDPOINT:http://localhost:9411/api/v2/spans}
+
+# OpenAPI Documentation
+springdoc:
+  api-docs:
+    enabled: true
+    path: /v3/api-docs
+  swagger-ui:
+    enabled: true
+    path: /swagger-ui.html
+    operationsSorter: method
+    disable-swagger-default-url: true
+    display-request-duration: true
+  show-actuator: false
+  group-configs:
+    - group: evaluations
+      display-name: Evaluations API
+      paths-to-match: /api/evaluations/**
+    - group: interviews
+      display-name: Interviews API
+      paths-to-match: /api/interviews/**
+    - group: rubrics
+      display-name: Rubrics API
+      paths-to-match: /api/rubrics/**
+
+# Application Specific Configuration
+application:
+  evaluations:
+    auto-assignment:
+      enabled: ${AUTO_ASSIGNMENT_ENABLED:true}
+      max-evaluator-load: ${MAX_EVALUATOR_LOAD:10}
+      round-robin-weight: ${ROUND_ROBIN_WEIGHT:1.0}
+      retry-attempts: ${ASSIGNMENT_RETRY_ATTEMPTS:3}
+    required-subjects:
+      HIGH_SCHOOL: MATHEMATICS,LANGUAGE,PSYCHOLOGY
+      BASIC: MATHEMATICS,LANGUAGE
+      PRESCHOOL: GENERAL,PSYCHOLOGY
+    evaluation-timeout-days: ${EVALUATION_TIMEOUT_DAYS:7}
+    scoring:
+      auto-complete-threshold: ${AUTO_COMPLETE_THRESHOLD:0.8}
+  
+  interviews:
+    scheduling:
+      buffer-minutes: ${INTERVIEW_BUFFER_MINUTES:15}
+      default-duration-minutes: ${DEFAULT_INTERVIEW_DURATION:45}
+      working-hours-start: ${WORKING_HOURS_START:08:00}
+      working-hours-end: ${WORKING_HOURS_END:18:00}
+      working-days: ${WORKING_DAYS:MONDAY,TUESDAY,WEDNESDAY,THURSDAY,FRIDAY}
+      advance-booking-days: ${ADVANCE_BOOKING_DAYS:2}
+      max-advance-booking-days: ${MAX_ADVANCE_BOOKING_DAYS:30}
+  
+  saga:
+    fallback-enabled: ${SAGA_FALLBACK_ENABLED:true}
+    application-service-url: ${APPLICATION_SERVICE_URL:http://localhost:8083}
+    timeout-seconds: ${SAGA_TIMEOUT_SECONDS:30}
+    retry-attempts: ${SAGA_RETRY_ATTEMPTS:3}
+  
+  events:
+    enabled: ${EVENTS_ENABLED:true}
+    outbox:
+      batch-size: ${OUTBOX_BATCH_SIZE:50}
+      processing-interval-seconds: ${OUTBOX_PROCESSING_INTERVAL:30}
+      cleanup-days: ${OUTBOX_CLEANUP_DAYS:7}
+      max-retry-attempts: ${OUTBOX_MAX_RETRY_ATTEMPTS:5}
+  
+  notifications:
+    enabled: ${NOTIFICATIONS_ENABLED:true}
+    templates:
+      interview-scheduled: interview_scheduled_template
+      interview-rescheduled: interview_rescheduled_template
+      interview-reminder: interview_reminder_template
+      evaluation-assigned: evaluation_assigned_template
+
+# Security Configuration
+security:
+  cors:
+    allowed-origins: 
+      - http://localhost:3000
+      - http://localhost:5173
+      - http://localhost:5174
+      - http://localhost:5175
+      - http://localhost:5176
+      - http://localhost:8080
+    allowed-methods: GET,POST,PUT,DELETE,PATCH,OPTIONS
+    allowed-headers: "*"
+    allow-credentials: true
+    max-age: 3600
+  
+  idempotency:
+    enabled: ${IDEMPOTENCY_ENABLED:true}
+    header-name: Idempotency-Key
+    cache-ttl-minutes: ${IDEMPOTENCY_TTL_MINUTES:5}
+    cache-size: ${IDEMPOTENCY_CACHE_SIZE:1000}
+
+# Logging Configuration
+logging:
+  level:
+    com.desafios.mtn.evaluationservice: ${LOG_LEVEL:INFO}
+    org.springframework.amqp: ${AMQP_LOG_LEVEL:WARN}
+    org.springframework.security: ${SECURITY_LOG_LEVEL:WARN}
+    org.hibernate.SQL: ${SQL_LOG_LEVEL:WARN}
+    org.hibernate.type.descriptor.sql.BasicBinder: ${SQL_BINDING_LOG_LEVEL:WARN}
+    org.flywaydb: ${FLYWAY_LOG_LEVEL:INFO}
+    root: ${ROOT_LOG_LEVEL:INFO}
+  pattern:
+    console: "%clr(%d{yyyy-MM-dd HH:mm:ss.SSS}){faint} %clr(%5p) %clr([%15.15t]){faint} %clr(%-40.40logger{39}){cyan} %clr([%X{traceId:-},%X{spanId:-}]){yellow} : %m%n%wEx"
+    file: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level [%X{traceId:-},%X{spanId:-}] %logger{36} - %msg%n"
+  file:
+    name: ${LOG_FILE:logs/evaluation-service.log}
+    max-size: ${LOG_MAX_FILE_SIZE:100MB}
+    max-history: ${LOG_MAX_HISTORY:30}
+
+---
+# Development Profile
+spring:
+  config:
+    activate:
+      on-profile: dev
+  
+  jpa:
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+        use_sql_comments: true
+  
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: guest
+    password: guest
+
+application:
+  evaluations:
+    auto-assignment:
+      enabled: true
+  saga:
+    fallback-enabled: true
+    application-service-url: http://localhost:8083
+
+logging:
+  level:
+    com.desafios.mtn.evaluationservice: DEBUG
+    org.springframework.amqp: INFO
+    org.hibernate.SQL: DEBUG
+    org.hibernate.type.descriptor.sql.BasicBinder: TRACE
+
+---
+# Testing Profile
+spring:
+  config:
+    activate:
+      on-profile: test
+  
+  datasource:
+    url: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    database: h2
+  
+  rabbitmq:
+    host: localhost
+    port: 5673
+    username: guest
+    password: guest
+
+eureka:
+  client:
+    enabled: false
+
+management:
+  tracing:
+    enabled: false
+
+application:
+  events:
+    enabled: false
+  notifications:
+    enabled: false
+
+---
+# Production Profile
+spring:
+  config:
+    activate:
+      on-profile: prod
+  
+  jpa:
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: false
+        use_sql_comments: false
+
+application:
+  evaluations:
+    auto-assignment:
+      enabled: true
+      max-evaluator-load: 15
+    evaluation-timeout-days: 5
+  
+  saga:
+    fallback-enabled: true
+    timeout-seconds: 60
+    retry-attempts: 5
+
+management:
+  tracing:
+    sampling:
+      probability: 0.01
+
+logging:
+  level:
+    com.desafios.mtn.evaluationservice: INFO
+    org.springframework.amqp: WARN
+    org.hibernate.SQL: WARN
+    root: WARN

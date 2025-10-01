@@ -1,0 +1,213 @@
+name: CI Pipeline
+on:
+  push:
+    branches: [ main, develop, 'feature/*' ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  TZ: America/Santiago
+  JAVA_VERSION: '17'
+  MAVEN_OPTS: '-Xmx1024m -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn'
+
+jobs:
+  test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Para SonarQube analysis completo
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: 'maven'
+
+      - name: Cache Maven Dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+
+      - name: Validate Maven Configuration
+        run: ./mvnw validate
+
+      - name: Compile Sources
+        run: ./mvnw clean compile -B -ntp
+
+      - name: Run Unit Tests
+        run: ./mvnw test -B -ntp
+        env:
+          SPRING_PROFILES_ACTIVE: test
+
+      - name: Run Integration Tests
+        if: success()
+        run: ./mvnw verify -B -ntp -Dskip.unit.tests=true
+        env:
+          SPRING_PROFILES_ACTIVE: integration-test
+
+      - name: Generate Test Report
+        uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: Maven Tests
+          path: target/surefire-reports/*.xml,target/failsafe-reports/*.xml
+          reporter: java-junit
+          fail-on-error: false
+
+      - name: Generate Coverage Report
+        if: success()
+        run: ./mvnw jacoco:report -B -ntp
+
+      - name: Upload Coverage to Codecov
+        if: success()
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./target/site/jacoco/jacoco.xml
+          flags: unittests
+          name: coverage-${{ github.sha }}
+
+      - name: SonarQube Analysis
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          if [ -n "$SONAR_TOKEN" ]; then
+            ./mvnw sonar:sonar -B -ntp \
+              -Dsonar.projectKey=${{ github.repository_owner }}_$(basename ${{ github.repository }}) \
+              -Dsonar.organization=${{ github.repository_owner }} \
+              -Dsonar.host.url=https://sonarcloud.io \
+              -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml
+          else
+            echo "SonarQube análisis omitido - SONAR_TOKEN no configurado"
+          fi
+
+      - name: Build Application JAR
+        if: success()
+        run: ./mvnw package -B -ntp -DskipTests
+
+      - name: Upload Build Artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jar-artifact-${{ github.sha }}
+          path: |
+            target/*.jar
+            target/classes/
+          retention-days: 7
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: test
+    if: always() && (needs.test.result == 'success' || needs.test.result == 'failure')
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy Vulnerability Scanner
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          exit-code: '0'  # No fallar el pipeline por vulnerabilidades en CI
+
+      - name: Upload Trivy Scan Results to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: OWASP Dependency Check
+        if: success()
+        run: |
+          if [ -f "pom.xml" ]; then
+            ./mvnw org.owasp:dependency-check-maven:check -B -ntp \
+              -DskipSystemScope=true \
+              -DfailBuildOnCVSS=7
+          fi
+
+  quality-gate:
+    name: Quality Gate
+    runs-on: ubuntu-latest
+    needs: [test, security-scan]
+    if: always()
+    
+    steps:
+      - name: Check Quality Gate
+        run: |
+          echo "Test Status: ${{ needs.test.result }}"
+          echo "Security Scan Status: ${{ needs.security-scan.result }}"
+          
+          if [ "${{ needs.test.result }}" != "success" ]; then
+            echo "❌ Tests fallaron - Quality Gate FAILED"
+            exit 1
+          fi
+          
+          if [ "${{ needs.security-scan.result }}" == "failure" ]; then
+            echo "⚠️  Security scan falló - Revisar vulnerabilidades"
+            # No fallar el pipeline, pero alertar
+          fi
+          
+          echo "✅ Quality Gate PASSED"
+
+  notify:
+    name: Notify Results
+    runs-on: ubuntu-latest
+    needs: [test, security-scan, quality-gate]
+    if: always() && github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Slack Notification
+        if: env.SLACK_WEBHOOK_URL != ''
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          channel: '#ci-cd'
+          username: 'GitHub Actions'
+          icon_emoji: ':github:'
+          fields: repo,message,commit,author,action,eventName,ref,workflow
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Teams Notification
+        if: failure() && env.TEAMS_WEBHOOK_URL != ''
+        uses: skitionek/notify-microsoft-teams@master
+        with:
+          webhook_url: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          needs: ${{ toJson(needs) }}
+          job: ${{ toJson(job) }}
+          steps: ${{ toJson(steps) }}
+
+  metrics:
+    name: Pipeline Metrics
+    runs-on: ubuntu-latest
+    needs: [quality-gate]
+    if: always()
+    
+    steps:
+      - name: Send Pipeline Metrics
+        run: |
+          # Simular envío de métricas a observabilidad
+          echo "Pipeline execution completed"
+          echo "Repository: ${{ github.repository }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Status: ${{ needs.quality-gate.result }}"
+          echo "Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          
+          # Aquí se enviarían métricas reales a Prometheus/DataDog/etc
+          # curl -X POST "https://metrics-endpoint" -d "pipeline_duration_seconds{repo=\"${{ github.repository }}\",branch=\"${{ github.ref_name }}\",status=\"${{ needs.quality-gate.result }}\"} $(date +%s)"

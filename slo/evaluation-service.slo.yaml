@@ -1,0 +1,135 @@
+version: "prometheus/v1"
+service: "evaluation-service"
+labels:
+  team: "backend"
+  environment: "production"
+  component: "evaluations"
+  
+slos:
+  # Latency SLO - 99% of requests should complete in <2s
+  - name: "requests-latency"
+    objective: 99
+    description: "99% of evaluation service HTTP requests should complete in less than 2 seconds"
+    sli:
+      events:
+        error_query: sum(rate(http_server_requests_seconds_count{app="evaluation-service", le!="2"}[5m]))
+        total_query: sum(rate(http_server_requests_seconds_count{app="evaluation-service"}[5m]))
+    alerting:
+      name: EvaluationServiceLatency
+      labels:
+        category: latency
+        service: evaluation-service
+      annotations:
+        summary: "Evaluation Service latency SLO violation"
+        runbook: "https://runbooks.mtn.cl/slo/evaluation-service-latency"
+      page_alert:
+        labels:
+          severity: page
+          team: backend
+        annotations:
+          summary: "Evaluation Service latency SLO burn rate is critical"
+          description: "Student evaluation and interview scheduling operations are slow"
+          impact: "Teachers and coordinators experiencing delays in evaluation workflows"
+          action: "Check database queries for evaluation data, verify file processing performance, review cache performance"
+      ticket_alert:
+        labels:
+          severity: ticket
+          team: backend
+        annotations:
+          summary: "Evaluation Service latency trending towards SLO violation"
+
+  # Availability SLO - 95% of requests should be successful
+  - name: "requests-availability"
+    objective: 95
+    description: "95% of evaluation service HTTP requests should be successful (status code <500)"
+    sli:
+      events:
+        error_query: sum(rate(http_server_requests_seconds_count{app="evaluation-service",status=~"5.."}[5m]))
+        total_query: sum(rate(http_server_requests_seconds_count{app="evaluation-service"}[5m]))
+    alerting:
+      name: EvaluationServiceAvailability
+      labels:
+        category: availability
+        service: evaluation-service
+      annotations:
+        summary: "Evaluation Service availability SLO violation"
+        runbook: "https://runbooks.mtn.cl/slo/evaluation-service-availability"
+      page_alert:
+        labels:
+          severity: page
+          team: backend
+        annotations:
+          summary: "Evaluation Service availability SLO burn rate is critical"
+          description: "Evaluation service experiencing high error rates"
+          impact: "Teachers cannot access or complete student evaluations - academic assessment process disrupted"
+          action: "IMMEDIATE: Check database connectivity, verify evaluation form logic, review permissions system"
+      ticket_alert:
+        labels:
+          severity: ticket
+          team: backend
+        annotations:
+          summary: "Evaluation Service availability requires investigation"
+
+  # Evaluation Completion Success Rate SLO - 99% of evaluations should complete successfully
+  - name: "evaluation-completion-success"
+    objective: 99
+    description: "99% of evaluation completions should be successful"
+    sli:
+      events:
+        error_query: sum(rate(evaluations_completed_total{app="evaluation-service",status!="success"}[5m]))
+        total_query: sum(rate(evaluations_completed_total{app="evaluation-service"}[5m]))
+    alerting:
+      name: EvaluationCompletionSuccess
+      labels:
+        category: business_logic
+        service: evaluation-service
+      annotations:
+        summary: "Evaluation completion success rate SLO violation"
+        runbook: "https://runbooks.mtn.cl/slo/evaluation-completion-success"
+      page_alert:
+        labels:
+          severity: page
+          team: backend
+        annotations:
+          summary: "Evaluation completion failure rate is critical"
+          description: "High number of evaluation completion failures"
+          impact: "Teachers losing evaluation work, student assessment process interrupted"
+          action: "Check form validation, verify autosave functionality, review database transaction handling"
+      ticket_alert:
+        labels:
+          severity: ticket
+          team: backend
+        annotations:
+          summary: "Evaluation completion success rate trending down"
+
+  # Interview Scheduling Success Rate SLO - 98% of scheduling should succeed
+  - name: "interview-scheduling-success"
+    objective: 98
+    description: "98% of interview scheduling operations should be successful"
+    sli:
+      events:
+        error_query: sum(rate(interview_scheduling_total{app="evaluation-service",status!="success"}[5m]))
+        total_query: sum(rate(interview_scheduling_total{app="evaluation-service"}[5m]))
+    alerting:
+      name: InterviewSchedulingSuccess
+      labels:
+        category: business_logic
+        service: evaluation-service
+      annotations:
+        summary: "Interview scheduling success rate SLO violation"
+        runbook: "https://runbooks.mtn.cl/slo/interview-scheduling-success"
+      page_alert:
+        labels:
+          severity: page
+          team: backend
+        annotations:
+          summary: "Interview scheduling failure rate is critical"
+          description: "High number of interview scheduling failures"
+          impact: "Directors cannot schedule interviews with families - admission process delayed"
+          action: "Check calendar integration, verify notification service, review scheduling conflict logic"
+      ticket_alert:
+        labels:
+          severity: ticket
+          team: backend
+        annotations:
+          summary: "Interview scheduling success rate trending down"

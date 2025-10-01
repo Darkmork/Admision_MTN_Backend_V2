@@ -1,0 +1,84 @@
+# user-service/src/main/resources/application-simple.yml
+# Configuración simplificada para integración con frontend
+
+server:
+  port: 8082
+
+spring:
+  application:
+    name: user-service
+    
+  # Database Configuration
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5433/users_db}
+    username: ${DB_USERNAME:users_admin}
+    password: ${DB_PASSWORD:users123}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 5
+      minimum-idle: 2
+      
+  # JPA Configuration
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+    open-in-view: false
+    
+  # Disable complex features for simple integration
+  flyway:
+    enabled: false
+  cache:
+    type: none
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USERNAME:admin}
+    password: ${RABBITMQ_PASSWORD:admin123}
+    # Disable for simple mode
+    publisher-confirm-type: none
+    publisher-returns: false
+
+# Management Configuration (simplified)
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+
+# CORS Configuration
+cors:
+  allowed-origins: 
+    - http://localhost:5173
+    - http://localhost:5174
+    - http://localhost:5175
+    - http://localhost:5176
+    - http://localhost:5177
+  allowed-methods:
+    - GET
+    - POST
+    - PUT
+    - DELETE
+    - OPTIONS
+  allowed-headers: "*"
+  allow-credentials: true
+
+# Logging Configuration (simplified)
+logging:
+  level:
+    com.desafios.mtn.userservice: INFO
+    org.springframework.web: INFO
+    org.hibernate: WARN
+    root: WARN
+
+# Disable Eureka for simple mode
+eureka:
+  client:
+    enabled: false
