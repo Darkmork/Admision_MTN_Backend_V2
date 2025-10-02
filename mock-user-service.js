@@ -562,7 +562,7 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     // Consultar base de datos para el usuario
     const userQuery = await client.query(
-      'SELECT id, first_name, last_name, email, role, password, active, email_verified FROM users WHERE email = $1',
+      'SELECT id, first_name, last_name, email, role, subject, password, active, email_verified FROM users WHERE email = $1',
       [email.toLowerCase().trim()]
     );
 
@@ -626,7 +626,8 @@ app.post('/api/auth/login', async (req, res) => {
       firstName: user.first_name,
       lastName: user.last_name,
       email: user.email,
-      role: user.role
+      role: user.role,
+      subject: user.subject
     });
 
   } catch (error) {
@@ -1124,7 +1125,7 @@ app.get('/api/users/me', authenticateToken, async (req, res) => {
   try {
     // Query database for user based on token data
     const userQuery = await client.query(
-      'SELECT id, first_name, last_name, email, role, phone, rut, active, email_verified, created_at FROM users WHERE id = $1',
+      'SELECT id, first_name, last_name, email, role, phone, rut, subject, active, email_verified, created_at FROM users WHERE id = $1',
       [parseInt(req.user.userId)]
     );
 
@@ -1149,7 +1150,7 @@ app.get('/api/users/me', authenticateToken, async (req, res) => {
         role: user.role,
         phone: user.phone,
         rut: user.rut,
-        subject: null,
+        subject: user.subject,
         educationalLevel: null,
         active: user.active,
         emailVerified: user.email_verified,
