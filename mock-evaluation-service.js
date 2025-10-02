@@ -3066,38 +3066,255 @@ app.get('/api/evaluations/my-pending', (req, res) => {
 });
 
 // Update evaluation
-app.put('/api/evaluations/:evaluationId', (req, res) => {
+app.put('/api/evaluations/:evaluationId', async (req, res) => {
   const { evaluationId } = req.params;
   const updateData = req.body;
 
   console.log(`✏️ Updating evaluation ${evaluationId}:`, updateData);
 
-  const evaluationIndex = mockEvaluations.findIndex(eval => eval.id === parseInt(evaluationId));
+  try {
+    const client = await dbPool.connect();
 
-  if (evaluationIndex !== -1) {
-    mockEvaluations[evaluationIndex] = {
-      ...mockEvaluations[evaluationIndex],
-      ...updateData,
-      updatedAt: new Date().toISOString()
-    };
-    res.json(mockEvaluations[evaluationIndex]);
-  } else {
-    res.status(404).json({ error: 'Evaluation not found' });
+    // Build dynamic UPDATE query based on provided fields
+    const allowedFields = [
+      'score', 'grade', 'observations', 'status',
+      'academic_readiness', 'behavioral_assessment', 'emotional_maturity',
+      'social_skills_assessment', 'motivation_assessment', 'family_support_assessment',
+      'integration_potential', 'strengths', 'areas_for_improvement',
+      'recommendations', 'final_recommendation', 'completion_date'
+    ];
+
+    const updates = [];
+    const values = [];
+    let paramIndex = 1;
+
+    // Add updated_at automatically
+    Object.keys(updateData).forEach(key => {
+      if (allowedFields.includes(key)) {
+        updates.push(`${key} = $${paramIndex}`);
+        values.push(updateData[key]);
+        paramIndex++;
+      }
+    });
+
+    // Always update updated_at
+    updates.push(`updated_at = NOW()`);
+
+    // If status is being set to COMPLETED, also set completion_date
+    if (updateData.status === 'COMPLETED' && !updateData.completion_date) {
+      updates.push(`completion_date = NOW()`);
+    }
+
+    if (updates.length === 1) { // Only updated_at
+      return res.status(400).json({ error: 'No valid fields to update' });
+    }
+
+    values.push(evaluationId);
+    const query = `
+      UPDATE evaluations
+      SET ${updates.join(', ')}
+      WHERE id = $${paramIndex}
+      RETURNING
+        id, application_id, evaluator_id, evaluation_type,
+        score, grade, observations, status,
+        academic_readiness, behavioral_assessment, emotional_maturity,
+        social_skills_assessment, motivation_assessment, family_support_assessment,
+        integration_potential, strengths, areas_for_improvement,
+        recommendations, final_recommendation,
+        created_at, updated_at, completion_date
+    `;
+
+    const result = await writeOperationBreaker.fire(client, query, values);
+    client.release();
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Evaluation not found' });
+    }
+
+    console.log('✅ Evaluation updated successfully:', result.rows[0]);
+    res.json(result.rows[0]);
+
+  } catch (error) {
+    console.error('❌ Error updating evaluation:', error);
+    res.status(500).json({
+      error: 'Error al actualizar la evaluación',
+      details: error.message
+    });
   }
 });
 
 // Get evaluation by ID
-app.get('/api/evaluations/:evaluationId', (req, res) => {
+app.get('/api/evaluations/:evaluationId', async (req, res) => {
   const { evaluationId } = req.params;
 
   console.log(`📋 Getting evaluation by ID: ${evaluationId}`);
 
-  const evaluation = mockEvaluations.find(eval => eval.id === parseInt(evaluationId));
+  try {
+    const client = await dbPool.connect();
 
-  if (evaluation) {
-    res.json(evaluation);
-  } else {
-    res.status(404).json({ error: 'Evaluation not found' });
+    const query = `
+      SELECT
+        e.id,
+        e.application_id,
+        e.evaluator_id,
+        e.evaluation_type,
+        e.score,
+        e.grade,
+        e.observations,
+        e.status,
+        e.academic_readiness,
+        e.behavioral_assessment,
+        e.emotional_maturity,
+        e.social_skills_assessment,
+        e.motivation_assessment,
+        e.family_support_assessment,
+        e.integration_potential,
+        e.strengths,
+        e.areas_for_improvement,
+        e.recommendations,
+        e.final_recommendation,
+        e.created_at,
+        e.updated_at,
+        e.completion_date,
+        e.evaluation_date,
+        s.first_name || ' ' || s.paternal_last_name || ' ' || COALESCE(s.maternal_last_name, '') as student_name,
+        s.grade_applied as student_grade,
+        s.birth_date as student_birthdate,
+        s.current_school,
+        u.first_name || ' ' || u.last_name as evaluator_name,
+        u.subject as evaluator_subject
+      FROM evaluations e
+      JOIN applications a ON a.id = e.application_id
+      JOIN students s ON s.id = a.student_id
+      JOIN users u ON u.id = e.evaluator_id
+      WHERE e.id = $1
+    `;
+
+    const result = await client.query(query, [evaluationId]);
+    client.release();
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Evaluation not found' });
+    }
+
+    res.json(result.rows[0]);
+
+  } catch (error) {
+    console.error('❌ Error fetching evaluation:', error);
+    res.status(500).json({
+      error: 'Error al obtener la evaluación',
+      details: error.message
+    });
+  }
+});
+
+// Get interview data for evaluation (HU-5)
+app.get('/api/evaluations/:evaluationId/interview', async (req, res) => {
+  const { evaluationId } = req.params;
+
+  console.log(`🎤 Getting interview data for evaluation ${evaluationId}`);
+
+  try {
+    const client = await dbPool.connect();
+
+    // First get the application_id from the evaluation
+    const evalQuery = `SELECT application_id FROM evaluations WHERE id = $1`;
+    const evalResult = await client.query(evalQuery, [evaluationId]);
+
+    if (evalResult.rows.length === 0) {
+      client.release();
+      return res.status(404).json({ error: 'Evaluation not found' });
+    }
+
+    const applicationId = evalResult.rows[0].application_id;
+
+    // Get interview data for this application
+    const interviewQuery = `
+      SELECT
+        i.id,
+        i.interview_type,
+        i.scheduled_date,
+        i.status,
+        i.evaluation_notes,
+        i.recommendation,
+        i.follow_up_required,
+        i.notes,
+        i.location,
+        i.interview_mode,
+        u.first_name || ' ' || u.last_name as interviewer_name
+      FROM interviews i
+      JOIN users u ON u.id = i.interviewer_id
+      WHERE i.application_id = $1
+      ORDER BY i.scheduled_date DESC
+      LIMIT 1
+    `;
+
+    const interviewResult = await simpleQueryBreaker.fire(client, interviewQuery, [applicationId]);
+    client.release();
+
+    if (interviewResult.rows.length === 0) {
+      return res.json({ hasInterview: false, interview: null });
+    }
+
+    res.json({
+      hasInterview: true,
+      interview: interviewResult.rows[0]
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching interview data:', error);
+    res.status(500).json({
+      error: 'Error al obtener datos de la entrevista',
+      details: error.message
+    });
+  }
+});
+
+// Get evaluation history for a student (HU-8)
+app.get('/api/evaluations/student/:studentId/history', async (req, res) => {
+  const { studentId } = req.params;
+
+  console.log(`📚 Getting evaluation history for student ${studentId}`);
+
+  try {
+    const client = await dbPool.connect();
+
+    const query = `
+      SELECT
+        e.id,
+        e.evaluation_type,
+        e.score,
+        e.grade,
+        e.status,
+        e.observations,
+        e.created_at,
+        e.completion_date,
+        a.id as application_id,
+        a.application_year,
+        u.first_name || ' ' || u.last_name as evaluator_name
+      FROM evaluations e
+      JOIN applications a ON a.id = e.application_id
+      JOIN students s ON s.id = a.student_id
+      JOIN users u ON u.id = e.evaluator_id
+      WHERE s.id = $1
+      ORDER BY e.created_at DESC
+    `;
+
+    const result = await mediumQueryBreaker.fire(client, query, [studentId]);
+    client.release();
+
+    res.json({
+      studentId: parseInt(studentId),
+      totalEvaluations: result.rows.length,
+      evaluations: result.rows
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching student evaluation history:', error);
+    res.status(500).json({
+      error: 'Error al obtener el historial de evaluaciones',
+      details: error.message
+    });
   }
 });
 
@@ -3278,6 +3495,342 @@ app.get('/api/evaluations/public/statistics', (req, res) => {
 
   res.json(stats);
 });
+
+// ============= HU-6: FILE ATTACHMENTS FOR EVALUATIONS =============
+
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+
+// Configure multer for file uploads
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    const uploadDir = path.join(__dirname, 'uploads', 'evaluation_attachments');
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, 'eval-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const upload = multer({
+  storage: storage,
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB max
+  fileFilter: function (req, file, cb) {
+    const allowedTypes = /pdf|jpg|jpeg|png|doc|docx/;
+    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = allowedTypes.test(file.mimetype);
+
+    if (mimetype && extname) {
+      return cb(null, true);
+    } else {
+      cb(new Error('Solo se permiten archivos PDF, imágenes (JPG, PNG) y documentos Word'));
+    }
+  }
+});
+
+// POST /api/evaluations/:evaluationId/attachments - Upload attachment
+app.post('/api/evaluations/:evaluationId/attachments', upload.single('file'), async (req, res) => {
+  const { evaluationId } = req.params;
+  const { description } = req.body;
+
+  if (!req.file) {
+    return res.status(400).json({ error: 'No se proporcionó ningún archivo' });
+  }
+
+  try {
+    const client = await dbPool.connect();
+
+    const query = `
+      INSERT INTO evaluation_attachments (
+        evaluation_id, file_name, original_name, file_path,
+        file_size, content_type, description, created_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+      RETURNING *
+    `;
+
+    const values = [
+      evaluationId,
+      req.file.filename,
+      req.file.originalname,
+      req.file.path,
+      req.file.size,
+      req.file.mimetype,
+      description || null
+    ];
+
+    const result = await writeOperationBreaker.fire(client, query, values);
+    client.release();
+
+    console.log(`✅ File uploaded for evaluation ${evaluationId}: ${req.file.originalname}`);
+
+    res.json({
+      success: true,
+      attachment: result.rows[0]
+    });
+  } catch (error) {
+    console.error('❌ Error uploading file:', error);
+
+    // Delete uploaded file if database insert fails
+    if (req.file && req.file.path) {
+      fs.unlink(req.file.path, (err) => {
+        if (err) console.error('Error deleting file after failed upload:', err);
+      });
+    }
+
+    res.status(500).json({
+      error: 'Error al subir el archivo',
+      details: error.message
+    });
+  }
+});
+
+// GET /api/evaluations/:evaluationId/attachments - Get all attachments
+app.get('/api/evaluations/:evaluationId/attachments', async (req, res) => {
+  const { evaluationId } = req.params;
+
+  try {
+    const client = await dbPool.connect();
+
+    const query = `
+      SELECT
+        id, evaluation_id, file_name, original_name,
+        file_size, content_type, description, created_at
+      FROM evaluation_attachments
+      WHERE evaluation_id = $1
+      ORDER BY created_at DESC
+    `;
+
+    const result = await simpleQueryBreaker.fire(client, query, [evaluationId]);
+    client.release();
+
+    res.json({
+      evaluationId: parseInt(evaluationId),
+      totalAttachments: result.rows.length,
+      attachments: result.rows
+    });
+  } catch (error) {
+    console.error('❌ Error fetching attachments:', error);
+    res.status(500).json({
+      error: 'Error al obtener los archivos adjuntos',
+      details: error.message
+    });
+  }
+});
+
+// GET /api/evaluations/attachments/:attachmentId/download - Download attachment
+app.get('/api/evaluations/attachments/:attachmentId/download', async (req, res) => {
+  const { attachmentId } = req.params;
+
+  try {
+    const client = await dbPool.connect();
+
+    const query = `
+      SELECT file_path, original_name, content_type
+      FROM evaluation_attachments
+      WHERE id = $1
+    `;
+
+    const result = await simpleQueryBreaker.fire(client, query, [attachmentId]);
+    client.release();
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Archivo no encontrado' });
+    }
+
+    const attachment = result.rows[0];
+
+    if (!fs.existsSync(attachment.file_path)) {
+      return res.status(404).json({ error: 'El archivo físico no existe' });
+    }
+
+    res.setHeader('Content-Type', attachment.content_type);
+    res.setHeader('Content-Disposition', `attachment; filename="${attachment.original_name}"`);
+
+    const fileStream = fs.createReadStream(attachment.file_path);
+    fileStream.pipe(res);
+
+  } catch (error) {
+    console.error('❌ Error downloading file:', error);
+    res.status(500).json({
+      error: 'Error al descargar el archivo',
+      details: error.message
+    });
+  }
+});
+
+// DELETE /api/evaluations/attachments/:attachmentId - Delete attachment
+app.delete('/api/evaluations/attachments/:attachmentId', async (req, res) => {
+  const { attachmentId } = req.params;
+
+  try {
+    const client = await dbPool.connect();
+
+    // First get the file path
+    const selectQuery = `SELECT file_path FROM evaluation_attachments WHERE id = $1`;
+    const selectResult = await simpleQueryBreaker.fire(client, selectQuery, [attachmentId]);
+
+    if (selectResult.rows.length === 0) {
+      client.release();
+      return res.status(404).json({ error: 'Archivo no encontrado' });
+    }
+
+    const filePath = selectResult.rows[0].file_path;
+
+    // Delete from database
+    const deleteQuery = `DELETE FROM evaluation_attachments WHERE id = $1`;
+    await writeOperationBreaker.fire(client, deleteQuery, [attachmentId]);
+    client.release();
+
+    // Delete physical file
+    if (fs.existsSync(filePath)) {
+      fs.unlink(filePath, (err) => {
+        if (err) console.error('Error deleting physical file:', err);
+      });
+    }
+
+    console.log(`✅ Attachment ${attachmentId} deleted successfully`);
+
+    res.json({
+      success: true,
+      message: 'Archivo eliminado correctamente'
+    });
+  } catch (error) {
+    console.error('❌ Error deleting attachment:', error);
+    res.status(500).json({
+      error: 'Error al eliminar el archivo',
+      details: error.message
+    });
+  }
+});
+
+console.log('✅ File attachment endpoints initialized');
+
+// ============= HU-7: NOTIFICATION TRIGGERS =============
+
+// Function to send notification when evaluation is assigned
+async function sendEvaluationAssignedNotification(evaluationId, evaluatorId, applicationId) {
+  try {
+    const client = await dbPool.connect();
+
+    // Get evaluator email
+    const userQuery = `SELECT email, first_name, last_name FROM users WHERE id = $1`;
+    const userResult = await simpleQueryBreaker.fire(client, userQuery, [evaluatorId]);
+
+    if (userResult.rows.length === 0) {
+      console.error('❌ Evaluator not found');
+      client.release();
+      return;
+    }
+
+    const evaluator = userResult.rows[0];
+
+    // Get application/student info
+    const appQuery = `
+      SELECT
+        s.first_name || ' ' || s.paternal_last_name as student_name,
+        s.grade_applied,
+        a.application_year
+      FROM applications a
+      JOIN students s ON s.id = a.student_id
+      WHERE a.id = $1
+    `;
+    const appResult = await simpleQueryBreaker.fire(client, appQuery, [applicationId]);
+
+    if (appResult.rows.length === 0) {
+      console.error('❌ Application not found');
+      client.release();
+      return;
+    }
+
+    const application = appResult.rows[0];
+
+    // Create notification record
+    const notificationQuery = `
+      INSERT INTO notifications (
+        user_id, type, title, message, status, created_at
+      ) VALUES ($1, $2, $3, $4, $5, NOW())
+      RETURNING id
+    `;
+
+    const title = 'Nueva Evaluación Asignada';
+    const message = `Se te ha asignado una nueva evaluación para el estudiante ${application.student_name} (${application.grade_applied}, Año ${application.application_year})`;
+
+    const notificationValues = [
+      evaluatorId,
+      'EVALUATION_ASSIGNED',
+      title,
+      message,
+      'PENDING'
+    ];
+
+    const notifResult = await writeOperationBreaker.fire(client, notificationQuery, notificationValues);
+    const notificationId = notifResult.rows[0].id;
+
+    client.release();
+
+    console.log(`✅ Notification created for evaluator ${evaluator.email}: Evaluation ${evaluationId}`);
+
+    // TODO: Send email via notification service
+    // For now, just log it
+    console.log(`📧 Email would be sent to: ${evaluator.email}`);
+    console.log(`   Subject: ${title}`);
+    console.log(`   Message: ${message}`);
+
+    return notificationId;
+
+  } catch (error) {
+    console.error('❌ Error sending evaluation notification:', error);
+  }
+}
+
+// Modified POST /api/evaluations endpoint with notification trigger
+app.post('/api/evaluations', async (req, res) => {
+  const { application_id, evaluator_id, evaluation_type } = req.body;
+
+  try {
+    const client = await dbPool.connect();
+
+    const query = `
+      INSERT INTO evaluations (
+        application_id, evaluator_id, evaluation_type,
+        status, created_at, updated_at
+      ) VALUES ($1, $2, $3, $4, NOW(), NOW())
+      RETURNING *
+    `;
+
+    const values = [
+      application_id,
+      evaluator_id,
+      evaluation_type,
+      'PENDING'
+    ];
+
+    const result = await writeOperationBreaker.fire(client, query, values);
+    client.release();
+
+    const newEvaluation = result.rows[0];
+
+    console.log(`✅ Evaluation created: ${newEvaluation.id} for application ${application_id}`);
+
+    // HU-7: Send notification to evaluator
+    await sendEvaluationAssignedNotification(newEvaluation.id, evaluator_id, application_id);
+
+    res.json(newEvaluation);
+  } catch (error) {
+    console.error('❌ Error creating evaluation:', error);
+    res.status(500).json({
+      error: 'Error al crear la evaluación',
+      details: error.message
+    });
+  }
+});
+
+console.log('✅ Notification trigger initialized');
 
 console.log('✅ Evaluation management endpoints initialized');
 

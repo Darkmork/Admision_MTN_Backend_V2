@@ -77,14 +77,18 @@ jobs:
   frontend:
     name: Frontend (React + TypeScript)
     runs-on: ubuntu-latest
-    
-    defaults:
-      run:
-        working-directory: ../Admision_MTN_front
 
     steps:
-      - name: Checkout code
+      - name: Checkout Backend Repository
         uses: actions/checkout@v4
+        with:
+          path: backend
+
+      - name: Checkout Frontend Repository
+        uses: actions/checkout@v4
+        with:
+          repository: Darkmork/Admision_MTN_front
+          path: frontend
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -93,6 +97,7 @@ jobs:
 
       - name: Detect package manager
         id: pkg-manager
+        working-directory: frontend
         run: |
           if [ -f "pnpm-lock.yaml" ]; then
             echo "manager=pnpm" >> $GITHUB_OUTPUT
@@ -109,6 +114,7 @@ jobs:
           version: 8
 
       - name: Install dependencies
+        working-directory: frontend
         run: |
           if [ "${{ steps.pkg-manager.outputs.manager }}" == "pnpm" ]; then
             pnpm install --frozen-lockfile
@@ -119,14 +125,17 @@ jobs:
           fi
 
       - name: TypeScript check
+        working-directory: frontend
         run: npm run typecheck || npx tsc --noEmit || echo "TypeScript check not configured"
         continue-on-error: true
 
       - name: ESLint
+        working-directory: frontend
         run: npm run lint || echo "Linter not configured"
         continue-on-error: true
 
       - name: Build frontend
+        working-directory: frontend
         run: npm run build
         env:
           VITE_API_BASE_URL: http://localhost:8080
@@ -135,7 +144,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: frontend-dist
-          path: ../Admision_MTN_front/dist/
+          path: frontend/dist/
           retention-days: 7
 
   # ============================================================================
@@ -226,25 +235,30 @@ jobs:
     name: E2E Tests
     runs-on: ubuntu-latest
     needs: [backend-nodejs, frontend]
-    
+
     steps:
-      - name: Checkout code
+      - name: Checkout Frontend Repository
         uses: actions/checkout@v4
+        with:
+          repository: Darkmork/Admision_MTN_front
+          path: frontend
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
 
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
       - name: Install Playwright
-        run: |
-          cd ../Admision_MTN_front
-          npx playwright install --with-deps
+        working-directory: frontend
+        run: npx playwright install --with-deps
 
       - name: Run E2E tests
-        run: |
-          cd ../Admision_MTN_front
-          npm run e2e || echo "E2E tests not configured yet"
+        working-directory: frontend
+        run: npm run e2e || echo "E2E tests not configured yet"
         continue-on-error: true
 
       - name: Upload test results
@@ -252,7 +266,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report
-          path: ../Admision_MTN_front/playwright-report/
+          path: frontend/playwright-report/
           retention-days: 7
 
   # ============================================================================
