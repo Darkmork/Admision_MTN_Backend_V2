@@ -2312,7 +2312,7 @@ app.patch('/api/applications/:id/status', authenticateToken, async (req, res) =>
     // Get current application with student info
     const currentAppQuery = `
       SELECT a.*,
-             s.first_name, s.last_name, s.email as student_email,
+             s.first_name, s.paternal_last_name, s.maternal_last_name, s.email as student_email,
              u.email as guardian_email, u.first_name as guardian_first_name
       FROM applications a
       LEFT JOIN students s ON a.student_id = s.id
