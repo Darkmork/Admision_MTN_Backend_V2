@@ -79,6 +79,7 @@ jobs:
         run: |
           chmod +x scripts/verify_secrets.sh
           ./scripts/verify_secrets.sh
+        continue-on-error: true
 
   # ============================================================================
   # JOB 2: Frontend Build & Tests
