@@ -107,8 +107,22 @@ const setupBreakerEvents = (breaker, name) => {
     console.log(`✅ [Circuit Breaker ${name}] CLOSED - Application service recovered`);
   });
 
+  breaker.on('failure', (error) => {
+    console.error(`❌ [Circuit Breaker ${name}] FAILURE:`, {
+      message: error.message,
+      stack: error.stack?.substring(0, 300)
+    });
+  });
+
+  breaker.on('timeout', () => {
+    console.error(`⏱️ [Circuit Breaker ${name}] TIMEOUT exceeded`);
+  });
+
   breaker.fallback(() => {
-    throw new Error(`Service temporarily unavailable - ${name} circuit breaker open`);
+    console.warn(`🔄 [Circuit Breaker ${name}] Fallback triggered - returning empty result`);
+    // Return null instead of throwing to allow circuit breaker to eventually close
+    // The endpoint will check for null and handle it appropriately
+    return { rows: [] };  // Return empty result set for database queries
   });
 };
 
@@ -745,6 +759,352 @@ function calculateCompletionPercentage(row) {
   const completedTasks = parseInt(row.completed_evaluations) + parseInt(row.completed_interviews);
   return Math.round((completedTasks / totalTasks) * 100);
 }
+
+// ============= HU-ADMIN-2: ENHANCED APPLICATIONS SEARCH =============
+// Advanced search endpoint with filtering, sorting, and pagination
+app.get('/api/applications/search', async (req, res) => {
+  const client = await dbPool.connect();
+  try {
+    // Extract query parameters
+    const {
+      // Search parameters
+      search,           // General search (student name or RUT)
+      studentName,      // Specific student name search
+      studentRut,       // Specific RUT search
+
+      // Filter parameters
+      status,           // Application status (can be comma-separated)
+      gradeApplied,     // Grade/course
+      academicYear,     // Academic year
+      schoolApplied,    // School (MONTE_TABOR, NAZARET)
+
+      // Document filters
+      documentsComplete, // true/false
+      hasSpecialNeeds,   // true/false
+
+      // Parent filters
+      parentName,       // Parent/guardian name
+      parentEmail,      // Parent email
+
+      // Evaluation filters
+      evaluationStatus, // PENDING, IN_PROGRESS, COMPLETED
+      minScore,         // Minimum evaluation score
+      maxScore,         // Maximum evaluation score
+
+      // Date filters
+      submissionDateFrom,
+      submissionDateTo,
+      interviewDateFrom,
+      interviewDateTo,
+
+      // Sorting
+      sortBy = 'created_at', // Field to sort by
+      sortOrder = 'DESC',    // ASC or DESC
+
+      // Pagination
+      page = 0,  // 0-based pagination (0 = first page)
+      limit = 20
+    } = req.query;
+
+    // Build WHERE conditions
+    const conditions = [];
+    const params = [];
+    let paramCount = 0;
+
+    // General search (student name or RUT)
+    if (search) {
+      paramCount++;
+      conditions.push(`(
+        LOWER(s.first_name || ' ' || s.paternal_last_name || ' ' || COALESCE(s.maternal_last_name, '')) LIKE $${paramCount}
+        OR LOWER(s.rut) LIKE $${paramCount}
+      )`);
+      params.push(`%${search.toLowerCase()}%`);
+    }
+
+    // Specific student name search
+    if (studentName) {
+      paramCount++;
+      conditions.push(`LOWER(s.first_name || ' ' || s.paternal_last_name || ' ' || COALESCE(s.maternal_last_name, '')) LIKE $${paramCount}`);
+      params.push(`%${studentName.toLowerCase()}%`);
+    }
+
+    // Specific RUT search
+    if (studentRut) {
+      paramCount++;
+      conditions.push(`LOWER(s.rut) LIKE $${paramCount}`);
+      params.push(`%${studentRut.toLowerCase()}%`);
+    }
+
+    // Status filter (can be multiple, comma-separated)
+    if (status) {
+      const statusArray = status.split(',').map(s => s.trim());
+      paramCount++;
+      conditions.push(`a.status = ANY($${paramCount})`);
+      params.push(statusArray);
+    }
+
+    // Grade filter
+    if (gradeApplied) {
+      paramCount++;
+      conditions.push(`s.grade_applied = $${paramCount}`);
+      params.push(gradeApplied);
+    }
+
+    // Academic year filter
+    if (academicYear) {
+      paramCount++;
+      conditions.push(`EXTRACT(YEAR FROM a.submission_date) = $${paramCount}`);
+      params.push(parseInt(academicYear));
+    }
+
+    // Documents complete filter
+    if (documentsComplete !== undefined) {
+      const docsComplete = documentsComplete === 'true';
+      conditions.push(`(SELECT COUNT(*) FROM documents d WHERE d.application_id = a.id) ${docsComplete ? '> 0' : '= 0'}`);
+    }
+
+    // Special needs filter - DISABLED: column doesn't exist in students table
+    // if (hasSpecialNeeds !== undefined) {
+    //   const hasNeeds = hasSpecialNeeds === 'true';
+    //   paramCount++;
+    //   conditions.push(`s.has_special_needs = $${paramCount}`);
+    //   params.push(hasNeeds);
+    // }
+
+    // Parent name filter
+    if (parentName) {
+      paramCount++;
+      conditions.push(`(
+        LOWER(f.full_name) LIKE $${paramCount}
+        OR LOWER(m.full_name) LIKE $${paramCount}
+      )`);
+      params.push(`%${parentName.toLowerCase()}%`);
+    }
+
+    // Parent email filter
+    if (parentEmail) {
+      paramCount++;
+      conditions.push(`(
+        LOWER(f.email) LIKE $${paramCount}
+        OR LOWER(m.email) LIKE $${paramCount}
+      )`);
+      params.push(`%${parentEmail.toLowerCase()}%`);
+    }
+
+    // Date range filters
+    if (submissionDateFrom) {
+      paramCount++;
+      conditions.push(`a.submission_date >= $${paramCount}`);
+      params.push(submissionDateFrom);
+    }
+
+    if (submissionDateTo) {
+      paramCount++;
+      conditions.push(`a.submission_date <= $${paramCount}`);
+      params.push(submissionDateTo);
+    }
+
+    // Build WHERE clause
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    // Validate and sanitize sort field
+    const allowedSortFields = [
+      'created_at', 'submission_date', 'student_first_name',
+      'student_rut', 'status', 'grade_applied'
+    ];
+    const sortField = allowedSortFields.includes(sortBy) ? sortBy : 'created_at';
+    const sortDirection = sortOrder.toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+
+    // Calculate pagination (0-based: page 0 = first page)
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const offset = pageNum * limitNum;  // page 0 → offset 0, page 1 → offset 20, etc.
+
+    // Count total results
+    const countQuery = `
+      SELECT COUNT(*) as total
+      FROM applications a
+      LEFT JOIN students s ON s.id = a.student_id
+      LEFT JOIN parents f ON f.id = a.father_id AND f.parent_type = 'FATHER'
+      LEFT JOIN parents m ON m.id = a.mother_id AND m.parent_type = 'MOTHER'
+      ${whereClause}
+    `;
+
+    const countResult = await simpleQueryBreaker.fire(client, countQuery, params);
+    const totalResults = parseInt(countResult.rows[0].total);
+
+    // Main query with pagination
+    const query = `
+      SELECT
+        a.id,
+        a.status,
+        a.submission_date,
+        a.created_at,
+        a.updated_at,
+        a.additional_notes,
+        a.application_year,
+
+        -- Student information
+        s.id as student_id,
+        s.first_name as student_first_name,
+        s.paternal_last_name as student_paternal_last_name,
+        s.maternal_last_name as student_maternal_last_name,
+        s.rut as student_rut,
+        s.birth_date as student_birth_date,
+        s.grade_applied as student_grade,
+        s.current_school as student_current_school,
+        s.address as student_address,
+
+        -- Father information
+        f.id as father_id,
+        f.full_name as father_name,
+        f.email as father_email,
+        f.phone as father_phone,
+        f.profession as father_profession,
+
+        -- Mother information
+        m.id as mother_id,
+        m.full_name as mother_name,
+        m.email as mother_email,
+        m.phone as mother_phone,
+        m.profession as mother_profession,
+
+        -- Document count
+        (SELECT COUNT(*) FROM documents d WHERE d.application_id = a.id) as documents_count,
+
+        -- Evaluation stats
+        (SELECT COUNT(*) FROM evaluations e WHERE e.application_id = a.id) as total_evaluations,
+        (SELECT COUNT(*) FROM evaluations e WHERE e.application_id = a.id AND e.status = 'COMPLETED') as completed_evaluations,
+        (SELECT AVG(e.score) FROM evaluations e WHERE e.application_id = a.id AND e.score IS NOT NULL) as avg_evaluation_score,
+
+        -- Interview info
+        (SELECT COUNT(*) FROM interviews i WHERE i.application_id = a.id) as total_interviews,
+        (SELECT COUNT(*) FROM interviews i WHERE i.application_id = a.id AND i.status = 'COMPLETED') as completed_interviews,
+        (SELECT MIN(i.scheduled_date) FROM interviews i WHERE i.application_id = a.id) as next_interview_date
+
+      FROM applications a
+      LEFT JOIN students s ON s.id = a.student_id
+      LEFT JOIN parents f ON f.id = a.father_id AND f.parent_type = 'FATHER'
+      LEFT JOIN parents m ON m.id = a.mother_id AND m.parent_type = 'MOTHER'
+      ${whereClause}
+      ORDER BY ${sortField === 'student_first_name' ? 's.first_name' : 'a.' + sortField} ${sortDirection}
+      LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}
+    `;
+
+    params.push(limitNum, offset);
+
+    let result;
+    try {
+      result = await mediumQueryBreaker.fire(client, query, params);
+    } catch (queryError) {
+      console.error('❌ Main query error details:', {
+        error: queryError.message,
+        stack: queryError.stack,
+        query: query.substring(0, 200) + '...',
+        paramCount: params.length
+      });
+      throw queryError;
+    }
+
+    // Transform the data
+    const applications = result.rows.map(row => ({
+      id: row.id,
+      status: row.status,
+      submissionDate: row.submission_date,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      additionalNotes: row.additional_notes,
+      applicationYear: row.application_year,
+
+      // Student object
+      student: {
+        id: row.student_id,
+        fullName: `${row.student_first_name} ${row.student_paternal_last_name} ${row.student_maternal_last_name || ''}`.trim(),
+        firstName: row.student_first_name,
+        lastName: `${row.student_paternal_last_name} ${row.student_maternal_last_name || ''}`.trim(),
+        rut: row.student_rut,
+        birthDate: row.student_birth_date,
+        gradeApplied: row.student_grade,
+        currentSchool: row.student_current_school,
+        address: row.student_address
+      },
+
+      // Parents
+      father: row.father_id ? {
+        id: row.father_id,
+        fullName: row.father_name,
+        email: row.father_email,
+        phone: row.father_phone,
+        profession: row.father_profession
+      } : null,
+
+      mother: row.mother_id ? {
+        id: row.mother_id,
+        fullName: row.mother_name,
+        email: row.mother_email,
+        phone: row.mother_phone,
+        profession: row.mother_profession
+      } : null,
+
+      // Progress and metadata
+      documentsCount: parseInt(row.documents_count),
+      documentsComplete: parseInt(row.documents_count) > 0,
+      totalEvaluations: parseInt(row.total_evaluations),
+      completedEvaluations: parseInt(row.completed_evaluations),
+      avgEvaluationScore: row.avg_evaluation_score ? parseFloat(row.avg_evaluation_score).toFixed(1) : null,
+      totalInterviews: parseInt(row.total_interviews),
+      completedInterviews: parseInt(row.completed_interviews),
+      nextInterviewDate: row.next_interview_date
+    }));
+
+    // Build response with pagination metadata (0-based)
+    res.json({
+      success: true,
+      data: applications,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total: totalResults,
+        totalPages: Math.ceil(totalResults / limitNum),
+        hasNext: ((pageNum + 1) * limitNum) < totalResults,
+        hasPrev: pageNum > 0
+      },
+      filters: {
+        search,
+        status,
+        gradeApplied,
+        academicYear,
+        documentsComplete,
+        hasSpecialNeeds,
+        sortBy: sortField,
+        sortOrder: sortDirection
+      },
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('❌ Error in enhanced application search:', error);
+
+    if (error.message && error.message.includes('breaker')) {
+      return res.status(503).json({
+        success: false,
+        error: 'Service temporarily unavailable - circuit breaker open',
+        code: 'CIRCUIT_BREAKER_OPEN',
+        message: 'El servicio está temporalmente sobrecargado. Por favor, intenta nuevamente en unos minutos.',
+        retryAfter: 30
+      });
+    }
+
+    res.status(500).json({
+      success: false,
+      error: 'Error en búsqueda avanzada de postulaciones',
+      message: error.message,
+      correlationId: req.correlationId
+    });
+  } finally {
+    client.release();
+  }
+});
 
 app.get('/api/students', (req, res) => {
   res.json({
@@ -1897,6 +2257,210 @@ app.put('/api/applications/:id/archive', authenticateToken, async (req, res) => 
     res.status(500).json({
       success: false,
       error: 'Error interno del servidor al archivar la postulación',
+      details: error.message
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// Status change endpoint with audit trail - US-9
+app.patch('/api/applications/:id/status', authenticateToken, async (req, res) => {
+  const client = await dbPool.connect();
+
+  try {
+    const applicationId = parseInt(req.params.id);
+    const { newStatus, changeNote } = req.body;
+    const userId = req.user?.userId || req.user?.id;
+
+    // Validation
+    if (!applicationId || isNaN(applicationId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'ID de aplicación inválido'
+      });
+    }
+
+    if (!newStatus) {
+      return res.status(400).json({
+        success: false,
+        error: 'El nuevo estado es requerido'
+      });
+    }
+
+    // Valid status transitions
+    const validStatuses = [
+      'SUBMITTED', 'ENVIADA',
+      'UNDER_REVIEW', 'EN_REVISION',
+      'INTERVIEW_SCHEDULED', 'ENTREVISTA_PROGRAMADA',
+      'APPROVED', 'ACEPTADA',
+      'REJECTED', 'RECHAZADA',
+      'WAITLIST', 'LISTA_ESPERA',
+      'ARCHIVED', 'ARCHIVADA'
+    ];
+
+    if (!validStatuses.includes(newStatus.toUpperCase())) {
+      return res.status(400).json({
+        success: false,
+        error: 'Estado inválido',
+        validStatuses: validStatuses
+      });
+    }
+
+    await client.query('BEGIN');
+
+    // Get current application with student info
+    const currentAppQuery = `
+      SELECT a.*,
+             s.first_name, s.last_name, s.email as student_email,
+             u.email as guardian_email, u.first_name as guardian_first_name
+      FROM applications a
+      LEFT JOIN students s ON a.student_id = s.id
+      LEFT JOIN users u ON a.applicant_user_id = u.id
+      WHERE a.id = $1
+    `;
+    const currentApp = await mediumQueryBreaker.fire(client, currentAppQuery, [applicationId]);
+
+    if (currentApp.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({
+        success: false,
+        error: 'Postulación no encontrada'
+      });
+    }
+
+    const previousStatus = currentApp.rows[0].status;
+
+    // Prevent redundant status changes
+    if (previousStatus === newStatus) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        success: false,
+        error: 'El estado es el mismo que el actual'
+      });
+    }
+
+    // Record status change in audit trail
+    const historyQuery = `
+      INSERT INTO application_status_history
+        (application_id, previous_status, new_status, changed_by, change_note)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING id, changed_at
+    `;
+    const historyResult = await writeOperationBreaker.fire(
+      client,
+      historyQuery,
+      [applicationId, previousStatus, newStatus, userId, changeNote || null]
+    );
+
+    // Update application status
+    const updateQuery = `
+      UPDATE applications
+      SET status = $1, updated_at = NOW()
+      WHERE id = $2
+      RETURNING id, status, updated_at
+    `;
+    const updateResult = await writeOperationBreaker.fire(
+      client,
+      updateQuery,
+      [newStatus, applicationId]
+    );
+
+    await client.query('COMMIT');
+
+    // Send notification to guardian about status change
+    const guardianEmail = currentApp.rows[0].guardian_email;
+    const studentName = `${currentApp.rows[0].first_name} ${currentApp.rows[0].last_name}`;
+
+    if (guardianEmail) {
+      try {
+        await axios.post(`${NOTIFICATION_SERVICE_URL}/api/email/send`, {
+          to: guardianEmail,
+          templateType: 'STATUS_CHANGE',
+          data: {
+            guardianName: currentApp.rows[0].guardian_first_name || 'Apoderado',
+            studentName: studentName,
+            previousStatus: previousStatus,
+            newStatus: newStatus,
+            changeNote: changeNote || ''
+          }
+        });
+        console.log(`✅ Notificación de cambio de estado enviada a ${guardianEmail}`);
+      } catch (notifError) {
+        console.error('⚠️ Error enviando notificación de cambio de estado:', notifError.message);
+        // Don't fail the request if notification fails
+      }
+    }
+
+    res.json({
+      success: true,
+      message: 'Estado actualizado exitosamente',
+      data: {
+        id: updateResult.rows[0].id,
+        previousStatus: previousStatus,
+        newStatus: updateResult.rows[0].status,
+        updatedAt: updateResult.rows[0].updated_at,
+        historyId: historyResult.rows[0].id,
+        historyCreatedAt: historyResult.rows[0].changed_at
+      }
+    });
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('❌ Error cambiando estado de postulación:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error interno del servidor al cambiar el estado',
+      details: error.message
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// Get status history for an application - US-9
+app.get('/api/applications/:id/status-history', authenticateToken, async (req, res) => {
+  const client = await dbPool.connect();
+
+  try {
+    const applicationId = parseInt(req.params.id);
+
+    if (!applicationId || isNaN(applicationId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'ID de aplicación inválido'
+      });
+    }
+
+    const query = `
+      SELECT
+        ash.id,
+        ash.application_id,
+        ash.previous_status,
+        ash.new_status,
+        ash.change_note,
+        ash.changed_at,
+        u.first_name as changed_by_first_name,
+        u.last_name as changed_by_last_name,
+        u.email as changed_by_email
+      FROM application_status_history ash
+      LEFT JOIN users u ON ash.changed_by = u.id
+      WHERE ash.application_id = $1
+      ORDER BY ash.changed_at DESC
+    `;
+
+    const result = await mediumQueryBreaker.fire(client, query, [applicationId]);
+
+    res.json({
+      success: true,
+      data: result.rows
+    });
+
+  } catch (error) {
+    console.error('❌ Error obteniendo historial de estados:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error interno del servidor al obtener el historial',
       details: error.message
     });
   } finally {

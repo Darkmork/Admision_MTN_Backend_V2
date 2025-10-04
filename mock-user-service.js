@@ -528,20 +528,68 @@ const users = [
 ];
 
 // Mock user endpoints (protected)
-app.get('/api/users', authenticateToken, (req, res) => {
-  // Filter by role if requested
-  const roleFilter = req.query.role;
-  let filteredUsers = users;
-  
-  if (roleFilter) {
-    filteredUsers = users.filter(user => user.role === roleFilter);
-  }
+app.get('/api/users', authenticateToken, async (req, res) => {
+  try {
+    // Filter by role if requested
+    const roleFilter = req.query.role;
 
-  res.json({
-    success: true,
-    data: filteredUsers,
-    count: filteredUsers.length
-  });
+    let query = `
+      SELECT
+        id,
+        first_name as "firstName",
+        last_name as "lastName",
+        email,
+        role,
+        subject,
+        rut,
+        phone,
+        active,
+        email_verified as "emailVerified",
+        created_at as "createdAt",
+        last_login as "lastLogin"
+      FROM users
+    `;
+
+    const params = [];
+    if (roleFilter) {
+      query += ' WHERE role = $1';
+      params.push(roleFilter);
+    }
+
+    query += ' ORDER BY role, first_name';
+
+    const result = await dbPool.query(query, params);
+
+    // Transform to match frontend format
+    const users = result.rows.map(user => ({
+      id: user.id,
+      fullName: `${user.firstName} ${user.lastName}`,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      email: user.email,
+      role: user.role,
+      subject: user.subject,
+      rut: user.rut,
+      phone: user.phone,
+      active: user.active,
+      emailVerified: user.emailVerified,
+      createdAt: user.createdAt,
+      lastLogin: user.lastLogin
+    }));
+
+    res.json({
+      success: true,
+      data: users,
+      count: users.length
+    });
+  } catch (error) {
+    console.error('❌ Error fetching users:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al obtener usuarios',
+      details: error.message
+    });
+  }
 });
 
 // Public login endpoint - consulta la base de datos PostgreSQL
@@ -824,9 +872,18 @@ app.put('/api/users/:id', authenticateToken, async (req, res) => {
 
   const client = await dbPool.connect();
   try {
-    // Hash password if provided
-    let hashedPassword = users[userIndex].password; // Keep current password if not updating
-    if (req.body.password) {
+    console.log('📝 Datos recibidos para actualizar usuario:', JSON.stringify(req.body, null, 2));
+
+    // Get current password from database
+    const currentUserQuery = await client.query(
+      'SELECT password FROM users WHERE id = $1',
+      [userId]
+    );
+
+    let hashedPassword = currentUserQuery.rows[0].password; // Keep current password by default
+
+    // Only hash and update password if a new one is provided
+    if (req.body.password && req.body.password.trim() !== '') {
       hashedPassword = await bcrypt.hash(req.body.password, 10);
     }
 
@@ -835,7 +892,7 @@ app.put('/api/users/:id', authenticateToken, async (req, res) => {
       ...users[userIndex],
       ...req.body,
       id: userId, // Preserve ID
-      password: hashedPassword, // Use hashed password
+      password: hashedPassword, // Use hashed password (current or new)
       fullName: req.body.firstName && req.body.lastName ?
                 `${req.body.firstName} ${req.body.lastName}`.trim() :
                 users[userIndex].fullName,
@@ -856,6 +913,8 @@ app.put('/api/users/:id', authenticateToken, async (req, res) => {
         email_verified = $8,
         rut = $9,
         phone = $10,
+        subject = $11,
+        educational_level = $12,
         updated_at = NOW()
       WHERE id = $1
     `;
@@ -865,12 +924,14 @@ app.put('/api/users/:id', authenticateToken, async (req, res) => {
       updatedUser.firstName,
       updatedUser.lastName,
       updatedUser.email,
-      updatedUser.password,
+      hashedPassword,
       updatedUser.role,
       updatedUser.active,
       updatedUser.emailVerified,
       updatedUser.rut,
-      updatedUser.phone
+      updatedUser.phone,
+      updatedUser.subject || null,
+      updatedUser.educationalLevel || null
     ]);
 
     console.log(`✅ Usuario actualizado en base de datos: ${updatedUser.firstName} ${updatedUser.lastName}`);

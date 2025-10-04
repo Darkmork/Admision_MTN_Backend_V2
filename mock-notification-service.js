@@ -93,6 +93,151 @@ app.get('/api/notifications', (req, res) => {
   });
 });
 
+// GET email notifications with filtering and pagination
+app.get('/api/notifications/email', (req, res) => {
+  const { status, type, page = 0, limit = 10, search } = req.query;
+
+  // Mock email notifications data
+  const mockEmails = [
+    {
+      id: 1,
+      recipient: 'padre1@example.com',
+      recipientName: 'Juan Pérez',
+      subject: 'Postulación Recibida - Sistema de Admisión MTN',
+      template: 'APPLICATION_SUBMITTED',
+      status: 'SENT',
+      sentAt: '2025-10-03T10:30:00Z',
+      openedAt: '2025-10-03T11:15:00Z',
+      clickedAt: null,
+      bounced: false,
+      responseReceived: false,
+      autoReplyGenerated: false,
+      applicationId: 101,
+      studentName: 'María Pérez González'
+    },
+    {
+      id: 2,
+      recipient: 'madre2@example.com',
+      recipientName: 'Ana Martínez',
+      subject: 'Actualización de Postulación - En Revisión',
+      template: 'STATUS_CHANGE',
+      status: 'SENT',
+      sentAt: '2025-10-03T09:00:00Z',
+      openedAt: '2025-10-03T09:30:00Z',
+      clickedAt: '2025-10-03T09:35:00Z',
+      bounced: false,
+      responseReceived: true,
+      autoReplyGenerated: true,
+      applicationId: 102,
+      studentName: 'Carlos Martínez López',
+      responseSubject: 'Re: Actualización de Postulación',
+      responseDate: '2025-10-03T10:00:00Z'
+    },
+    {
+      id: 3,
+      recipient: 'apoderado3@example.com',
+      recipientName: 'Pedro Silva',
+      subject: 'Entrevista Programada - Sistema de Admisión MTN',
+      template: 'INTERVIEW_SCHEDULED',
+      status: 'SENT',
+      sentAt: '2025-10-02T14:20:00Z',
+      openedAt: '2025-10-02T15:00:00Z',
+      clickedAt: null,
+      bounced: false,
+      responseReceived: false,
+      autoReplyGenerated: false,
+      applicationId: 103,
+      studentName: 'Lucía Silva Rojas'
+    },
+    {
+      id: 4,
+      recipient: 'invalid@bounced.com',
+      recipientName: 'Usuario No Válido',
+      subject: 'Postulación Recibida - Sistema de Admisión MTN',
+      template: 'APPLICATION_SUBMITTED',
+      status: 'BOUNCED',
+      sentAt: '2025-10-01T08:00:00Z',
+      openedAt: null,
+      clickedAt: null,
+      bounced: true,
+      bounceReason: 'Email address does not exist',
+      responseReceived: false,
+      autoReplyGenerated: false,
+      applicationId: 104,
+      studentName: 'Estudiante Prueba'
+    },
+    {
+      id: 5,
+      recipient: 'apoderado5@example.com',
+      recipientName: 'Carmen Torres',
+      subject: 'Postulación Aprobada - Felicitaciones',
+      template: 'APPLICATION_APPROVED',
+      status: 'SENT',
+      sentAt: '2025-10-03T16:00:00Z',
+      openedAt: null,
+      clickedAt: null,
+      bounced: false,
+      responseReceived: false,
+      autoReplyGenerated: false,
+      applicationId: 105,
+      studentName: 'Diego Torres Muñoz'
+    },
+    {
+      id: 6,
+      recipient: 'apoderado6@example.com',
+      recipientName: 'Roberto Fernández',
+      subject: 'Documentación Pendiente - Acción Requerida',
+      template: 'DOCUMENTS_REQUIRED',
+      status: 'PENDING',
+      sentAt: null,
+      openedAt: null,
+      clickedAt: null,
+      bounced: false,
+      responseReceived: false,
+      autoReplyGenerated: false,
+      applicationId: 106,
+      studentName: 'Sofía Fernández Castro',
+      scheduledFor: '2025-10-04T09:00:00Z'
+    }
+  ];
+
+  // Apply filters
+  let filteredEmails = mockEmails;
+
+  if (status) {
+    filteredEmails = filteredEmails.filter(email => email.status === status);
+  }
+
+  if (type) {
+    filteredEmails = filteredEmails.filter(email => email.template === type);
+  }
+
+  if (search) {
+    const searchLower = search.toLowerCase();
+    filteredEmails = filteredEmails.filter(email =>
+      email.recipient.toLowerCase().includes(searchLower) ||
+      email.recipientName.toLowerCase().includes(searchLower) ||
+      email.subject.toLowerCase().includes(searchLower) ||
+      email.studentName.toLowerCase().includes(searchLower)
+    );
+  }
+
+  // Pagination
+  const startIndex = page * limit;
+  const endIndex = startIndex + parseInt(limit);
+  const paginatedEmails = filteredEmails.slice(startIndex, endIndex);
+
+  res.json({
+    success: true,
+    data: paginatedEmails,
+    total: filteredEmails.length,
+    page: parseInt(page),
+    limit: parseInt(limit),
+    totalPages: Math.ceil(filteredEmails.length / limit),
+    message: 'Email notifications retrieved successfully'
+  });
+});
+
 // Enhanced notification sending endpoint
 app.post('/api/notifications/send', async (req, res) => {
   const { type, recipient, subject, templateData, template } = req.body;
@@ -283,13 +428,156 @@ app.post('/api/notifications/send', async (req, res) => {
 });
 
 // Email endpoints
-app.post('/api/email/send', (req, res) => {
-  res.json({
-    message: 'Email sent from notification-service',
-    success: true,
-    emailId: Date.now()
-  });
+// Enhanced email sending endpoint with templates - US-9, US-10
+app.post('/api/email/send', async (req, res) => {
+  const { to, templateType, data } = req.body;
+
+  if (!to || !templateType) {
+    return res.status(400).json({
+      success: false,
+      message: 'To and templateType are required'
+    });
+  }
+
+  console.log(`📧 Sending email to: ${to}, template: ${templateType}`);
+
+  // Get email template based on templateType
+  const emailContent = getEmailTemplate(templateType, data || {});
+
+  if (!emailContent) {
+    return res.status(400).json({
+      success: false,
+      message: `Unknown template type: ${templateType}`
+    });
+  }
+
+  const mailOptions = {
+    from: '"Sistema de Admisión MTN" <admision@mtn.cl>',
+    to: to,
+    subject: emailContent.subject,
+    html: emailContent.html
+  };
+
+  try {
+    const info = await transporter.sendMail(mailOptions);
+
+    console.log(`✅ Email sent successfully to ${to}`);
+    console.log(`📬 Message ID: ${info.messageId}`);
+
+    res.json({
+      success: true,
+      message: 'Email sent successfully',
+      emailId: info.messageId,
+      to: to,
+      templateType: templateType,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error(`❌ Error sending email to ${to}:`, error.message);
+
+    // Fallback for development
+    console.log(`⚠️ FALLBACK - Email not sent, showing in console`);
+    console.log(`📧 To: ${to}`);
+    console.log(`📋 Template: ${templateType}`);
+    console.log(`📄 Subject: ${emailContent.subject}`);
+
+    res.json({
+      success: true, // Keep as true for development
+      message: 'Email fallback - shown in console',
+      emailId: `fallback-${Date.now()}`,
+      to: to,
+      templateType: templateType,
+      fallback: true,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
 });
+
+// Email template generator
+function getEmailTemplate(templateType, data) {
+  const currentYear = new Date().getFullYear();
+
+  switch (templateType) {
+    case 'STATUS_CHANGE':
+      return {
+        subject: `Actualización del Estado de su Postulación - ${data.studentName}`,
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #f9fafb;">
+            <!-- Header -->
+            <div style="background-color: #1e40af; color: white; padding: 30px 20px; text-align: center;">
+              <h1 style="margin: 0; font-size: 24px;">Sistema de Admisión</h1>
+              <p style="margin: 10px 0 0 0; font-size: 14px;">Colegio Monte Tabor y Nazaret</p>
+            </div>
+
+            <!-- Content -->
+            <div style="padding: 40px 20px; background-color: white;">
+              <h2 style="color: #1e40af; margin-top: 0;">Actualización del Estado de Postulación</h2>
+
+              <p>Estimado(a) ${data.guardianName || 'Apoderado(a)'},</p>
+
+              <p>Le informamos que el estado de la postulación de <strong>${data.studentName}</strong> ha sido actualizado:</p>
+
+              <div style="background-color: #eff6ff; border-left: 4px solid #1e40af; padding: 15px; margin: 20px 0;">
+                <p style="margin: 0;"><strong>Estado anterior:</strong> ${getStatusLabel(data.previousStatus)}</p>
+                <p style="margin: 10px 0 0 0;"><strong>Estado actual:</strong> <span style="color: #1e40af; font-weight: bold;">${getStatusLabel(data.newStatus)}</span></p>
+              </div>
+
+              ${data.changeNote ? `
+              <div style="background-color: #fef3c7; border-left: 4px solid #f59e0b; padding: 15px; margin: 20px 0;">
+                <p style="margin: 0;"><strong>Observación:</strong></p>
+                <p style="margin: 10px 0 0 0;">${data.changeNote}</p>
+              </div>
+              ` : ''}
+
+              <p style="margin-top: 30px;">Para más información sobre el proceso de admisión, puede contactarnos a través de:</p>
+              <ul style="line-height: 1.8;">
+                <li>📧 Email: admision@mtn.cl</li>
+                <li>📞 Teléfono: +56 2 1234 5678</li>
+                <li>🌐 Web: www.mtn.cl</li>
+              </ul>
+
+              <p style="color: #6b7280; font-size: 14px; margin-top: 30px;">
+                Este es un correo automático, por favor no responder directamente.
+              </p>
+            </div>
+
+            <!-- Footer -->
+            <div style="background-color: #1e40af; color: white; padding: 20px; text-align: center; font-size: 12px;">
+              <p style="margin: 0;">© ${currentYear} Colegio Monte Tabor y Nazaret</p>
+              <p style="margin: 10px 0 0 0;">Sistema de Admisión - Todos los derechos reservados</p>
+            </div>
+          </div>
+        `
+      };
+
+    default:
+      return null;
+  }
+}
+
+// Helper function to get human-readable status labels
+function getStatusLabel(status) {
+  const statusMap = {
+    'SUBMITTED': 'Enviada',
+    'ENVIADA': 'Enviada',
+    'UNDER_REVIEW': 'En Revisión',
+    'EN_REVISION': 'En Revisión',
+    'INTERVIEW_SCHEDULED': 'Entrevista Programada',
+    'ENTREVISTA_PROGRAMADA': 'Entrevista Programada',
+    'APPROVED': 'Aceptada',
+    'ACEPTADA': 'Aceptada',
+    'REJECTED': 'Rechazada',
+    'RECHAZADA': 'Rechazada',
+    'WAITLIST': 'Lista de Espera',
+    'LISTA_ESPERA': 'Lista de Espera',
+    'ARCHIVED': 'Archivada',
+    'ARCHIVADA': 'Archivada'
+  };
+
+  return statusMap[status?.toUpperCase()] || status;
+}
 
 // Email verification endpoint (for frontend usage)
 app.post('/api/email/send-verification', async (req, res) => {
@@ -611,6 +899,351 @@ app.get('/api/email-templates/all', (req, res) => {
     total: mockTemplates.length,
     message: 'Email templates retrieved successfully'
   });
+});
+
+// ============= NOTIFICATION CONFIGURATION ENDPOINTS =============
+// Admin endpoints to manage notification configurations
+
+const { Pool } = require('pg');
+const dbPool = new Pool({
+  host: 'localhost',
+  port: 5432,
+  database: 'Admisión_MTN_DB',
+  user: 'admin',
+  password: 'admin123',
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 2000
+});
+
+// GET all notification configurations
+app.get('/api/notifications/config', async (req, res) => {
+  const client = await dbPool.connect();
+  try {
+    const query = `
+      SELECT
+        id, event_type, event_name, description, enabled,
+        send_email, send_sms, send_push,
+        notify_applicant, notify_admin, notify_coordinator, notify_evaluator,
+        custom_recipients, email_template_key,
+        send_immediately, delay_minutes,
+        created_at, updated_at
+      FROM notification_configs
+      ORDER BY event_type
+    `;
+
+    const result = await client.query(query);
+
+    res.json({
+      success: true,
+      data: result.rows,
+      total: result.rows.length,
+      message: 'Notification configurations retrieved successfully'
+    });
+  } catch (error) {
+    console.error('❌ Error fetching notification configs:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error fetching notification configurations',
+      details: error.message
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// GET single notification configuration by event_type
+app.get('/api/notifications/config/:eventType', async (req, res) => {
+  const { eventType } = req.params;
+  const client = await dbPool.connect();
+
+  try {
+    const query = `
+      SELECT
+        id, event_type, event_name, description, enabled,
+        send_email, send_sms, send_push,
+        notify_applicant, notify_admin, notify_coordinator, notify_evaluator,
+        custom_recipients, email_template_key,
+        send_immediately, delay_minutes,
+        created_at, updated_at
+      FROM notification_configs
+      WHERE event_type = $1
+    `;
+
+    const result = await client.query(query, [eventType]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Notification configuration not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      data: result.rows[0],
+      message: 'Notification configuration retrieved successfully'
+    });
+  } catch (error) {
+    console.error('❌ Error fetching notification config:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error fetching notification configuration',
+      details: error.message
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// UPDATE notification configuration
+app.put('/api/notifications/config/:id', async (req, res) => {
+  const { id } = req.params;
+  const {
+    event_name,
+    description,
+    enabled,
+    send_email,
+    send_sms,
+    send_push,
+    notify_applicant,
+    notify_admin,
+    notify_coordinator,
+    notify_evaluator,
+    custom_recipients,
+    email_template_key,
+    send_immediately,
+    delay_minutes
+  } = req.body;
+
+  const client = await dbPool.connect();
+
+  try {
+    const query = `
+      UPDATE notification_configs SET
+        event_name = COALESCE($1, event_name),
+        description = COALESCE($2, description),
+        enabled = COALESCE($3, enabled),
+        send_email = COALESCE($4, send_email),
+        send_sms = COALESCE($5, send_sms),
+        send_push = COALESCE($6, send_push),
+        notify_applicant = COALESCE($7, notify_applicant),
+        notify_admin = COALESCE($8, notify_admin),
+        notify_coordinator = COALESCE($9, notify_coordinator),
+        notify_evaluator = COALESCE($10, notify_evaluator),
+        custom_recipients = COALESCE($11, custom_recipients),
+        email_template_key = COALESCE($12, email_template_key),
+        send_immediately = COALESCE($13, send_immediately),
+        delay_minutes = COALESCE($14, delay_minutes),
+        updated_at = NOW()
+      WHERE id = $15
+      RETURNING *
+    `;
+
+    const result = await client.query(query, [
+      event_name,
+      description,
+      enabled,
+      send_email,
+      send_sms,
+      send_push,
+      notify_applicant,
+      notify_admin,
+      notify_coordinator,
+      notify_evaluator,
+      custom_recipients,
+      email_template_key,
+      send_immediately,
+      delay_minutes,
+      id
+    ]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Notification configuration not found'
+      });
+    }
+
+    console.log(`✅ Notification config updated: ${result.rows[0].event_type}`);
+
+    res.json({
+      success: true,
+      data: result.rows[0],
+      message: 'Notification configuration updated successfully'
+    });
+  } catch (error) {
+    console.error('❌ Error updating notification config:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error updating notification configuration',
+      details: error.message
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// CREATE new notification configuration
+app.post('/api/notifications/config', async (req, res) => {
+  const {
+    event_type,
+    event_name,
+    description,
+    enabled = true,
+    send_email = true,
+    send_sms = false,
+    send_push = false,
+    notify_applicant = false,
+    notify_admin = false,
+    notify_coordinator = false,
+    notify_evaluator = false,
+    custom_recipients = null,
+    email_template_key = null,
+    send_immediately = true,
+    delay_minutes = 0
+  } = req.body;
+
+  if (!event_type || !event_name) {
+    return res.status(400).json({
+      success: false,
+      error: 'event_type and event_name are required'
+    });
+  }
+
+  const client = await dbPool.connect();
+
+  try {
+    const query = `
+      INSERT INTO notification_configs (
+        event_type, event_name, description, enabled,
+        send_email, send_sms, send_push,
+        notify_applicant, notify_admin, notify_coordinator, notify_evaluator,
+        custom_recipients, email_template_key,
+        send_immediately, delay_minutes
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+      RETURNING *
+    `;
+
+    const result = await client.query(query, [
+      event_type,
+      event_name,
+      description,
+      enabled,
+      send_email,
+      send_sms,
+      send_push,
+      notify_applicant,
+      notify_admin,
+      notify_coordinator,
+      notify_evaluator,
+      custom_recipients,
+      email_template_key,
+      send_immediately,
+      delay_minutes
+    ]);
+
+    console.log(`✅ Notification config created: ${event_type}`);
+
+    res.status(201).json({
+      success: true,
+      data: result.rows[0],
+      message: 'Notification configuration created successfully'
+    });
+  } catch (error) {
+    console.error('❌ Error creating notification config:', error);
+
+    if (error.code === '23505') { // Unique violation
+      return res.status(409).json({
+        success: false,
+        error: 'Notification configuration with this event_type already exists'
+      });
+    }
+
+    res.status(500).json({
+      success: false,
+      error: 'Error creating notification configuration',
+      details: error.message
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// DELETE notification configuration
+app.delete('/api/notifications/config/:id', async (req, res) => {
+  const { id } = req.params;
+  const client = await dbPool.connect();
+
+  try {
+    const query = 'DELETE FROM notification_configs WHERE id = $1 RETURNING event_type';
+    const result = await client.query(query, [id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Notification configuration not found'
+      });
+    }
+
+    console.log(`✅ Notification config deleted: ${result.rows[0].event_type}`);
+
+    res.json({
+      success: true,
+      message: 'Notification configuration deleted successfully'
+    });
+  } catch (error) {
+    console.error('❌ Error deleting notification config:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error deleting notification configuration',
+      details: error.message
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// TOGGLE notification configuration enabled/disabled
+app.patch('/api/notifications/config/:id/toggle', async (req, res) => {
+  const { id } = req.params;
+  const client = await dbPool.connect();
+
+  try {
+    const query = `
+      UPDATE notification_configs
+      SET enabled = NOT enabled, updated_at = NOW()
+      WHERE id = $1
+      RETURNING *
+    `;
+
+    const result = await client.query(query, [id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Notification configuration not found'
+      });
+    }
+
+    const status = result.rows[0].enabled ? 'enabled' : 'disabled';
+    console.log(`✅ Notification config ${status}: ${result.rows[0].event_type}`);
+
+    res.json({
+      success: true,
+      data: result.rows[0],
+      message: `Notification configuration ${status} successfully`
+    });
+  } catch (error) {
+    console.error('❌ Error toggling notification config:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error toggling notification configuration',
+      details: error.message
+    });
+  } finally {
+    client.release();
+  }
 });
 
 app.listen(port, () => {

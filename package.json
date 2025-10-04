@@ -8,7 +8,11 @@
     "test": "tests"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "bash integration-tests.sh",
+    "test:integration": "bash integration-tests.sh",
+    "test:smoke": "curl -f http://localhost:8082/health && curl -f http://localhost:8083/health && curl -f http://localhost:8084/health && curl -f http://localhost:8085/health && curl -f http://localhost:8086/health && curl -f http://localhost:8087/health",
+    "start:services": "node mock-user-service.js & node mock-application-service.js & node mock-evaluation-service.js & node mock-notification-service.js & node mock-dashboard-service.js & node mock-guardian-service.js &",
+    "lint": "eslint *.js --max-warnings 350"
   },
   "repository": {
     "type": "git",
@@ -33,5 +37,8 @@
     "opossum": "^9.0.0",
     "pdfkit": "^0.17.2",
     "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "eslint": "^9.37.0"
   }
 }

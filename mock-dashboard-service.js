@@ -205,16 +205,17 @@ setInterval(() => {
 
 // Middleware
 app.use(express.json());
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Cache-Control');
-  if (req.method === 'OPTIONS') {
-    res.sendStatus(200);
-  } else {
-    next();
-  }
-});
+// CORS is handled by NGINX gateway - commented to avoid duplicate headers
+// app.use((req, res, next) => {
+//   res.header('Access-Control-Allow-Origin', '*');
+//   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+//   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Cache-Control');
+//   if (req.method === 'OPTIONS') {
+//     res.sendStatus(200);
+//   } else {
+//     next();
+//   }
+// });
 
 // Mock data
 const dashboardData = {
@@ -421,9 +422,21 @@ app.get('/api/dashboard/stats', async (req, res) => {
       SELECT COUNT(*) as total_users FROM users
     `, []);
 
+    const evaluatorStats = await queryWithCircuitBreaker.fire(client, `
+      SELECT COUNT(DISTINCT evaluator_id) as active_evaluators
+      FROM evaluations
+      WHERE evaluator_id IS NOT NULL
+    `, []);
+
+    const notificationStats = await queryWithCircuitBreaker.fire(client, `
+      SELECT COUNT(*) as total_notifications FROM email_notifications
+    `, []);
+
     const stats = applicationStats.rows[0];
     const interviewData = interviewStats.rows[0];
     const userData = userStats.rows[0];
+    const evaluatorData = evaluatorStats.rows[0];
+    const notificationData = notificationStats.rows[0];
 
     const realStats = {
       totalUsers: parseInt(userData.total_users),
@@ -433,8 +446,8 @@ app.get('/api/dashboard/stats', async (req, res) => {
       rejectedApplications: parseInt(stats.rejected_applications),
       scheduledInterviews: parseInt(interviewData.scheduled_interviews),
       completedInterviews: parseInt(interviewData.completed_interviews),
-      activeEvaluators: 12, // Mock value for now
-      totalNotifications: 89, // Mock value for now
+      activeEvaluators: parseInt(evaluatorData?.active_evaluators || 0),
+      totalNotifications: parseInt(notificationData?.total_notifications || 0),
       systemHealth: "excellent"
     };
 
@@ -599,9 +612,21 @@ app.get('/api/dashboard/admin/stats', async (req, res) => {
       SELECT COUNT(*) as total_users FROM users
     `, []);
 
+    const evaluatorStats = await queryWithCircuitBreaker.fire(client, `
+      SELECT COUNT(DISTINCT evaluator_id) as active_evaluators
+      FROM evaluations
+      WHERE evaluator_id IS NOT NULL
+    `, []);
+
+    const notificationStats = await queryWithCircuitBreaker.fire(client, `
+      SELECT COUNT(*) as total_notifications FROM email_notifications
+    `, []);
+
     const stats = applicationStats.rows[0];
     const interviewData = interviewStats.rows[0];
     const userData = userStats.rows[0];
+    const evaluatorData = evaluatorStats.rows[0];
+    const notificationData = notificationStats.rows[0];
 
     const realStats = {
       totalUsers: parseInt(userData.total_users),
@@ -611,8 +636,8 @@ app.get('/api/dashboard/admin/stats', async (req, res) => {
       rejectedApplications: parseInt(stats.rejected_applications),
       scheduledInterviews: parseInt(interviewData.scheduled_interviews),
       completedInterviews: parseInt(interviewData.completed_interviews),
-      activeEvaluators: 12, // Mock value for now
-      totalNotifications: 89, // Mock value for now
+      activeEvaluators: parseInt(evaluatorData?.active_evaluators || 0),
+      totalNotifications: parseInt(notificationData?.total_notifications || 0),
       systemHealth: "excellent"
     };
 
@@ -1184,6 +1209,160 @@ app.get('/api/dashboard/cache/stats', (req, res) => {
     cacheSize: dashboardCache.size(),
     serviceUptime: process.uptime()
   });
+});
+
+// ============= HU-ADMIN-1: DETAILED DASHBOARD STATS =============
+// Nuevo endpoint para estadísticas detalladas del dashboard de administración
+app.get('/api/dashboard/admin/detailed-stats', async (req, res) => {
+  const { academicYear } = req.query;
+  const yearFilter = academicYear ? parseInt(academicYear) : new Date().getFullYear() + 1;
+
+  // Check cache first
+  const cacheKey = `dashboard:detailed-stats:${yearFilter}`;
+  const cached = dashboardCache.get(cacheKey);
+  if (cached) {
+    console.log(`[Cache HIT] dashboard:detailed-stats:${yearFilter}`);
+    return res.json(cached);
+  }
+  console.log(`[Cache MISS] dashboard:detailed-stats:${yearFilter}`);
+
+  const client = await dbPool.connect();
+  try {
+    // 1. Entrevistas de la semana actual
+    const today = new Date();
+    const startOfWeek = new Date(today);
+    startOfWeek.setDate(today.getDate() - today.getDay()); // Domingo
+    const endOfWeek = new Date(startOfWeek);
+    endOfWeek.setDate(startOfWeek.getDate() + 7);
+
+    const weeklyInterviewsQuery = await mediumQueryBreaker.fire(client, `
+      SELECT
+        COUNT(*) as total,
+        COUNT(CASE WHEN status = 'SCHEDULED' THEN 1 END) as scheduled,
+        COUNT(CASE WHEN status = 'COMPLETED' THEN 1 END) as completed
+      FROM interviews
+      WHERE scheduled_date >= $1 AND scheduled_date < $2
+    `, [startOfWeek.toISOString(), endOfWeek.toISOString()]);
+
+    // 2. Evaluaciones pendientes por tipo
+    const pendingEvaluationsQuery = await mediumQueryBreaker.fire(client, `
+      SELECT
+        evaluation_type,
+        COUNT(*) as count
+      FROM evaluations
+      WHERE status IN ('PENDING', 'IN_PROGRESS')
+      GROUP BY evaluation_type
+      ORDER BY count DESC
+    `, []);
+
+    // 3. Tendencias mensuales de postulaciones (últimos 12 meses)
+    const twelveMonthsAgo = new Date();
+    twelveMonthsAgo.setMonth(twelveMonthsAgo.getMonth() - 12);
+
+    const monthlyTrendsQuery = await heavyQueryBreaker.fire(client, `
+      SELECT
+        TO_CHAR(created_at, 'YYYY-MM') as month,
+        COUNT(*) as total,
+        COUNT(CASE WHEN status = 'SUBMITTED' THEN 1 END) as submitted,
+        COUNT(CASE WHEN status = 'APPROVED' THEN 1 END) as approved,
+        COUNT(CASE WHEN status = 'REJECTED' THEN 1 END) as rejected
+      FROM applications
+      WHERE created_at >= $1
+        AND (application_year = $2 OR application_year IS NULL)
+      GROUP BY TO_CHAR(created_at, 'YYYY-MM')
+      ORDER BY month ASC
+    `, [twelveMonthsAgo.toISOString(), yearFilter]);
+
+    // 4. Estadísticas por estado (para el año seleccionado)
+    const statusStatsQuery = await mediumQueryBreaker.fire(client, `
+      SELECT
+        status,
+        COUNT(*) as count
+      FROM applications
+      WHERE application_year = $1 OR application_year IS NULL
+      GROUP BY status
+    `, [yearFilter]);
+
+    // 5. Años académicos disponibles
+    const academicYearsQuery = await simpleQueryBreaker.fire(client, `
+      SELECT DISTINCT application_year
+      FROM applications
+      WHERE application_year IS NOT NULL
+      ORDER BY application_year DESC
+    `, []);
+
+    // Construir respuesta
+    const weeklyInterviews = weeklyInterviewsQuery.rows[0];
+
+    const pendingEvaluations = {};
+    pendingEvaluationsQuery.rows.forEach(row => {
+      pendingEvaluations[row.evaluation_type] = parseInt(row.count);
+    });
+
+    const monthlyTrends = monthlyTrendsQuery.rows.map(row => ({
+      month: row.month,
+      total: parseInt(row.total),
+      submitted: parseInt(row.submitted),
+      approved: parseInt(row.approved),
+      rejected: parseInt(row.rejected)
+    }));
+
+    const statusBreakdown = {};
+    statusStatsQuery.rows.forEach(row => {
+      statusBreakdown[row.status] = parseInt(row.count);
+    });
+
+    const academicYears = academicYearsQuery.rows.map(row => row.application_year);
+
+    const response = {
+      success: true,
+      data: {
+        academicYear: yearFilter,
+        availableYears: academicYears,
+        weeklyInterviews: {
+          total: parseInt(weeklyInterviews.total),
+          scheduled: parseInt(weeklyInterviews.scheduled),
+          completed: parseInt(weeklyInterviews.completed),
+          weekRange: {
+            start: startOfWeek.toISOString(),
+            end: endOfWeek.toISOString()
+          }
+        },
+        pendingEvaluations: {
+          byType: pendingEvaluations,
+          total: Object.values(pendingEvaluations).reduce((sum, count) => sum + count, 0)
+        },
+        monthlyTrends,
+        statusBreakdown
+      },
+      timestamp: new Date().toISOString()
+    };
+
+    // Cache for 5 minutes
+    dashboardCache.set(cacheKey, response, 300000);
+    res.json(response);
+
+  } catch (error) {
+    console.error('❌ Error fetching detailed dashboard stats:', error);
+
+    if (error.message && error.message.includes('breaker')) {
+      return res.status(503).json({
+        success: false,
+        error: 'Service temporarily unavailable - circuit breaker open',
+        code: 'CIRCUIT_BREAKER_OPEN',
+        message: 'El servicio está temporalmente sobrecargado. Por favor, intenta nuevamente en unos minutos.',
+        retryAfter: 30
+      });
+    }
+
+    res.status(500).json({
+      success: false,
+      error: 'Error al obtener estadísticas detalladas',
+      message: error.message
+    });
+  } finally {
+    client.release();
+  }
 });
 
 // Health check
