@@ -16,10 +16,31 @@
 
 const express = require('express');
 const CircuitBreaker = require('opossum');
+const { Pool } = require('pg');
+const bcrypt = require('bcryptjs');
 const app = express();
 const port = 8087; // Puerto diferente al user-service y notification-service
 
 app.use(express.json());
+
+// ============= DATABASE CONNECTION POOL =============
+const dbPool = new Pool({
+  host: 'localhost',
+  port: 5432,
+  database: 'Admisión_MTN_DB',
+  user: 'admin',
+  password: 'admin123',
+  max: 20,                    // 20 connections per service
+  idleTimeoutMillis: 30000,   // Close idle after 30s
+  connectionTimeoutMillis: 2000, // 2s connection timeout
+  query_timeout: 5000         // 5s query timeout
+});
+
+dbPool.on('error', (err) => {
+  console.error('⚠️ Unexpected database pool error:', err);
+});
+
+console.log('✅ Database connection pool initialized (max: 20 connections)');
 
 // ============= DIFFERENTIATED CIRCUIT BREAKERS =============
 // 3 circuit breaker categories for Guardian Service
@@ -295,45 +316,109 @@ app.post('/api/guardians/auth/login', (req, res) => {
 });
 
 // Registro de nuevo apoderado (público - para postulaciones)
-app.post('/api/guardians/auth/register', (req, res) => {
-  const { firstName, lastName, email, rut, phone, address, relationshipType } = req.body;
-  
-  // Verificar si ya existe
-  const existingGuardian = guardians.find(g => g.email === email || g.rut === rut);
-  
-  if (existingGuardian) {
-    return res.status(400).json({
+app.post('/api/guardians/auth/register', async (req, res) => {
+  const { firstName, lastName, email, rut, phone, address, relationshipType, password } = req.body;
+
+  try {
+    // Verificar si ya existe en la base de datos
+    const existingCheck = await dbPool.query(
+      'SELECT id FROM guardians WHERE email = $1 OR rut = $2',
+      [email, rut]
+    );
+
+    if (existingCheck.rows.length > 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Ya existe un apoderado con este email o RUT'
+      });
+    }
+
+    // Crear fullName
+    const fullName = `${firstName} ${lastName}`;
+    const relationship = relationshipType || 'PADRE';
+
+    // Insertar guardian en la base de datos
+    const guardianQuery = `
+      INSERT INTO guardians (full_name, rut, email, phone, relationship, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+      RETURNING id, full_name as "fullName", rut, email, phone, relationship, created_at as "createdAt"
+    `;
+
+    const guardianResult = await writeOperationBreaker.fire(async () => {
+      return await dbPool.query(guardianQuery, [fullName, rut, email, phone, relationship]);
+    });
+
+    const newGuardian = guardianResult.rows[0];
+
+    // También crear usuario en la tabla users para autenticación
+    const hashedPassword = await bcrypt.hash(password || 'defaultPassword123', 10);
+
+    const userQuery = `
+      INSERT INTO users (first_name, last_name, email, password, role, rut, phone, active, email_verified, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+      RETURNING id
+    `;
+
+    const userResult = await writeOperationBreaker.fire(async () => {
+      return await dbPool.query(userQuery, [
+        firstName,
+        lastName,
+        email,
+        hashedPassword,
+        'APODERADO',
+        rut,
+        phone,
+        true,
+        false
+      ]);
+    });
+
+    const userId = userResult.rows[0].id;
+
+    console.log(`✅ Guardian registered successfully: ID=${newGuardian.id}, UserID=${userId}, Email=${email}`);
+
+    // Agregar al array en memoria para compatibilidad con endpoints existentes
+    guardians.push({
+      id: newGuardian.id,
+      firstName,
+      lastName,
+      fullName: newGuardian.fullName,
+      email: newGuardian.email,
+      rut: newGuardian.rut,
+      phone: newGuardian.phone,
+      address: address || '',
+      relationshipType: newGuardian.relationship,
+      active: true,
+      emailVerified: false,
+      createdAt: newGuardian.createdAt,
+      emergencyContact: true,
+      authorizedToPickup: true,
+      applicantIds: []
+    });
+
+    res.status(201).json({
+      success: true,
+      data: {
+        id: newGuardian.id,
+        userId: userId,
+        firstName,
+        lastName,
+        fullName: newGuardian.fullName,
+        email: newGuardian.email,
+        rut: newGuardian.rut,
+        phone: newGuardian.phone,
+        relationshipType: newGuardian.relationship
+      },
+      token: 'mock-jwt-token-for-new-guardian'
+    });
+  } catch (error) {
+    console.error('❌ Error registering guardian:', error);
+    res.status(500).json({
       success: false,
-      error: 'Ya existe un apoderado con este email o RUT'
+      error: 'Error al registrar apoderado',
+      details: error.message
     });
   }
-  
-  // Crear nuevo apoderado
-  const newGuardian = {
-    id: guardians.length + 1,
-    firstName,
-    lastName,
-    fullName: `${firstName} ${lastName}`,
-    email,
-    rut,
-    phone,
-    address,
-    relationshipType: relationshipType || 'PADRE',
-    active: true,
-    emailVerified: false,
-    createdAt: new Date().toISOString(),
-    emergencyContact: true,
-    authorizedToPickup: true,
-    applicantIds: []
-  };
-  
-  guardians.push(newGuardian);
-  
-  res.status(201).json({
-    success: true,
-    data: newGuardian,
-    token: 'mock-jwt-token-for-new-guardian'
-  });
 });
 
 // Actualizar información del apoderado
