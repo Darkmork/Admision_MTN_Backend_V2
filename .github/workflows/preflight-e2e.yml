@@ -57,6 +57,7 @@ jobs:
         node mock-evaluation-service.js > eval-service.log 2>&1 &
         node mock-notification-service.js > notif-service.log 2>&1 &
         node mock-dashboard-service.js > dash-service.log 2>&1 &
+        node mock-guardian-service.js > guardian-service.log 2>&1 &
 
         # Wait for services to start
         echo "Waiting for services to be ready..."
@@ -154,6 +155,7 @@ jobs:
         node mock-evaluation-service.js > eval-service.log 2>&1 &
         node mock-notification-service.js > notif-service.log 2>&1 &
         node mock-dashboard-service.js > dash-service.log 2>&1 &
+        node mock-guardian-service.js > guardian-service.log 2>&1 &
 
         sleep 10
 
@@ -254,6 +256,7 @@ jobs:
         node mock-evaluation-service.js > eval-service.log 2>&1 &
         node mock-notification-service.js > notif-service.log 2>&1 &
         node mock-dashboard-service.js > dash-service.log 2>&1 &
+        node mock-guardian-service.js > guardian-service.log 2>&1 &
 
         # Wait for backend services
         sleep 10

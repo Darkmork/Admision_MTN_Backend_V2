@@ -201,14 +201,358 @@ app.get('/health', (req, res) => {
 });
 
 // Mock evaluation endpoints
-app.get('/api/evaluations', (req, res) => {
-  res.json({
-    message: 'Evaluations from evaluation-service microservice',
-    evaluations: [
-      { id: 1, studentId: 1, type: 'ACADEMIC', score: 85 },
-      { id: 2, studentId: 2, type: 'PSYCHOLOGICAL', score: 92 }
-    ]
-  });
+// Get all evaluations - FIXED: Now queries real database instead of mock data
+app.get('/api/evaluations', async (req, res) => {
+  const client = await dbPool.connect();
+  try {
+    console.log('📊 Getting ALL evaluations from database (including Alejandra Flores)');
+
+    // Query all evaluations with evaluator and student information
+    const result = await mediumQueryBreaker.fire(client, `
+      SELECT
+        e.*,
+        u.id as evaluator_user_id,
+        u.first_name as evaluator_first_name,
+        u.last_name as evaluator_last_name,
+        u.email as evaluator_email,
+        u.role as evaluator_role,
+        u.subject as evaluator_subject,
+        a.student_id,
+        s.first_name as student_first_name,
+        s.paternal_last_name as student_last_name,
+        a.status as application_status
+      FROM evaluations e
+      LEFT JOIN users u ON e.evaluator_id = u.id
+      LEFT JOIN applications a ON e.application_id = a.id
+      LEFT JOIN students s ON a.student_id = s.id
+      ORDER BY e.created_at DESC
+    `, []);
+
+    const evaluations = result.rows.map(row => ({
+      id: row.id,
+      evaluationType: row.evaluation_type,
+      status: row.status,
+      score: row.score,
+      grade: row.grade,
+      applicationId: row.application_id,
+      evaluatorId: row.evaluator_id,
+      scheduleId: row.schedule_id,
+      evaluationDate: row.evaluation_date,
+      completionDate: row.completion_date,
+      observations: row.observations,
+      strengths: row.strengths,
+      areasForImprovement: row.areas_for_improvement,
+      recommendations: row.recommendations,
+      academicReadiness: row.academic_readiness,
+      socialSkillsAssessment: row.social_skills_assessment,
+      emotionalMaturity: row.emotional_maturity,
+      behavioralAssessment: row.behavioral_assessment,
+      motivationAssessment: row.motivation_assessment,
+      familySupportAssessment: row.family_support_assessment,
+      integrationPotential: row.integration_potential,
+      finalRecommendation: row.final_recommendation,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      evaluator: {
+        id: row.evaluator_user_id,
+        firstName: row.evaluator_first_name,
+        lastName: row.evaluator_last_name,
+        email: row.evaluator_email,
+        role: row.evaluator_role,
+        subject: row.evaluator_subject
+      },
+      student: {
+        id: row.student_id,
+        firstName: row.student_first_name,
+        lastName: row.student_last_name
+      },
+      applicationStatus: row.application_status
+    }));
+
+    console.log(`✅ Found ${evaluations.length} evaluations in database`);
+
+    res.json({
+      success: true,
+      data: evaluations,
+      count: evaluations.length
+    });
+  } catch (error) {
+    console.error('❌ Error fetching evaluations:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al obtener evaluaciones',
+      message: error.message
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// Get evaluation types metadata - Returns available evaluation types
+// NOTE: This route MUST come BEFORE /api/evaluations/:evaluationId to avoid route conflicts
+app.get('/api/evaluations/metadata/types', async (req, res) => {
+  try {
+    console.log('📋 Getting evaluation types metadata');
+
+    const evaluationTypes = [
+      {
+        code: 'LANGUAGE_EXAM',
+        name: 'Examen de Lenguaje',
+        description: 'Evaluación de competencias lingüísticas y comprensión lectora'
+      },
+      {
+        code: 'MATHEMATICS_EXAM',
+        name: 'Examen de Matemáticas',
+        description: 'Evaluación de habilidades matemáticas y razonamiento lógico'
+      },
+      {
+        code: 'ENGLISH_EXAM',
+        name: 'Examen de Inglés',
+        description: 'Evaluación de nivel de inglés'
+      },
+      {
+        code: 'PSYCHOLOGICAL_EVALUATION',
+        name: 'Evaluación Psicológica',
+        description: 'Evaluación del desarrollo emocional y social del estudiante'
+      },
+      {
+        code: 'INTERVIEW',
+        name: 'Entrevista',
+        description: 'Entrevista personal con estudiante y/o apoderados'
+      },
+      {
+        code: 'ENTRANCE_EXAM',
+        name: 'Examen de Admisión',
+        description: 'Examen general de admisión'
+      }
+    ];
+
+    res.json({
+      success: true,
+      data: evaluationTypes
+    });
+  } catch (error) {
+    console.error('❌ Error getting evaluation types:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al obtener tipos de evaluación',
+      message: error.message
+    });
+  }
+});
+
+// Get evaluation statistics - FIXED: Now queries real database instead of mock data
+// NOTE: This route MUST come BEFORE /api/evaluations/:evaluationId to avoid route conflicts
+app.get('/api/evaluations/statistics', async (req, res) => {
+  const client = await dbPool.connect();
+  try {
+    console.log('📊 Getting evaluation statistics from database');
+
+    // Total count
+    const totalResult = await simpleQueryBreaker.fire(client,
+      'SELECT COUNT(*) as total FROM evaluations',
+      []
+    );
+    const totalEvaluations = parseInt(totalResult.rows[0].total);
+
+    // Status breakdown
+    const statusResult = await simpleQueryBreaker.fire(client, `
+      SELECT status, COUNT(*) as count
+      FROM evaluations
+      GROUP BY status
+    `, []);
+
+    const statusBreakdown = {
+      PENDING: 0,
+      IN_PROGRESS: 0,
+      COMPLETED: 0
+    };
+    statusResult.rows.forEach(row => {
+      statusBreakdown[row.status] = parseInt(row.count);
+    });
+
+    // Type breakdown
+    const typeResult = await simpleQueryBreaker.fire(client, `
+      SELECT evaluation_type, COUNT(*) as count
+      FROM evaluations
+      GROUP BY evaluation_type
+    `, []);
+
+    const typeBreakdown = {
+      LANGUAGE_EXAM: 0,
+      MATHEMATICS_EXAM: 0,
+      ENGLISH_EXAM: 0,
+      CYCLE_DIRECTOR_REPORT: 0,
+      PSYCHOLOGICAL_INTERVIEW: 0
+    };
+    typeResult.rows.forEach(row => {
+      typeBreakdown[row.evaluation_type] = parseInt(row.count);
+    });
+
+    // Average scores by type (only for exams with numeric scores)
+    const avgScoresResult = await simpleQueryBreaker.fire(client, `
+      SELECT evaluation_type, AVG(score) as avg_score
+      FROM evaluations
+      WHERE score IS NOT NULL
+        AND evaluation_type IN ('LANGUAGE_EXAM', 'MATHEMATICS_EXAM', 'ENGLISH_EXAM')
+      GROUP BY evaluation_type
+    `, []);
+
+    const averageScoresByType = {};
+    avgScoresResult.rows.forEach(row => {
+      averageScoresByType[row.evaluation_type] = parseFloat(row.avg_score).toFixed(2);
+    });
+
+    // Evaluator activity
+    const evaluatorResult = await mediumQueryBreaker.fire(client, `
+      SELECT
+        u.first_name || ' ' || u.last_name as evaluator_name,
+        COUNT(e.id) as evaluation_count
+      FROM evaluations e
+      JOIN users u ON e.evaluator_id = u.id
+      GROUP BY u.id, u.first_name, u.last_name
+      ORDER BY evaluation_count DESC
+    `, []);
+
+    const evaluatorActivity = {};
+    evaluatorResult.rows.forEach(row => {
+      evaluatorActivity[row.evaluator_name] = parseInt(row.evaluation_count);
+    });
+
+    // Completion rate
+    const completionRate = totalEvaluations > 0
+      ? ((statusBreakdown.COMPLETED / totalEvaluations) * 100).toFixed(2)
+      : 0;
+
+    const stats = {
+      totalEvaluations,
+      statusBreakdown,
+      typeBreakdown,
+      averageScoresByType,
+      evaluatorActivity,
+      completionRate: parseFloat(completionRate)
+    };
+
+    console.log(`✅ Statistics calculated: ${totalEvaluations} total evaluations`);
+    res.json(stats);
+
+  } catch (error) {
+    console.error('❌ Error fetching evaluation statistics:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al obtener estadísticas de evaluaciones',
+      message: error.message
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// Get evaluation statistics (public endpoint) - FIXED: Now queries real database
+// NOTE: This route MUST come BEFORE /api/evaluations/:evaluationId to avoid route conflicts
+app.get('/api/evaluations/public/statistics', async (req, res) => {
+  const client = await dbPool.connect();
+  try {
+    console.log('📊 Getting evaluation statistics from database (public)');
+
+    // Total count
+    const totalResult = await simpleQueryBreaker.fire(client,
+      'SELECT COUNT(*) as total FROM evaluations',
+      []
+    );
+    const totalEvaluations = parseInt(totalResult.rows[0].total);
+
+    // Status breakdown
+    const statusResult = await simpleQueryBreaker.fire(client, `
+      SELECT status, COUNT(*) as count
+      FROM evaluations
+      GROUP BY status
+    `, []);
+
+    const statusBreakdown = {
+      PENDING: 0,
+      IN_PROGRESS: 0,
+      COMPLETED: 0
+    };
+    statusResult.rows.forEach(row => {
+      statusBreakdown[row.status] = parseInt(row.count);
+    });
+
+    // Type breakdown
+    const typeResult = await simpleQueryBreaker.fire(client, `
+      SELECT evaluation_type, COUNT(*) as count
+      FROM evaluations
+      GROUP BY evaluation_type
+    `, []);
+
+    const typeBreakdown = {
+      LANGUAGE_EXAM: 0,
+      MATHEMATICS_EXAM: 0,
+      ENGLISH_EXAM: 0,
+      CYCLE_DIRECTOR_REPORT: 0,
+      PSYCHOLOGICAL_INTERVIEW: 0
+    };
+    typeResult.rows.forEach(row => {
+      typeBreakdown[row.evaluation_type] = parseInt(row.count);
+    });
+
+    // Average scores by type (only for exams with numeric scores)
+    const avgScoresResult = await simpleQueryBreaker.fire(client, `
+      SELECT evaluation_type, AVG(score) as avg_score
+      FROM evaluations
+      WHERE score IS NOT NULL
+        AND evaluation_type IN ('LANGUAGE_EXAM', 'MATHEMATICS_EXAM', 'ENGLISH_EXAM')
+      GROUP BY evaluation_type
+    `, []);
+
+    const averageScoresByType = {};
+    avgScoresResult.rows.forEach(row => {
+      averageScoresByType[row.evaluation_type] = parseFloat(row.avg_score).toFixed(2);
+    });
+
+    // Evaluator activity
+    const evaluatorResult = await mediumQueryBreaker.fire(client, `
+      SELECT
+        u.first_name || ' ' || u.last_name as evaluator_name,
+        COUNT(e.id) as evaluation_count
+      FROM evaluations e
+      JOIN users u ON e.evaluator_id = u.id
+      GROUP BY u.id, u.first_name, u.last_name
+      ORDER BY evaluation_count DESC
+    `, []);
+
+    const evaluatorActivity = {};
+    evaluatorResult.rows.forEach(row => {
+      evaluatorActivity[row.evaluator_name] = parseInt(row.evaluation_count);
+    });
+
+    // Completion rate
+    const completionRate = totalEvaluations > 0
+      ? ((statusBreakdown.COMPLETED / totalEvaluations) * 100).toFixed(2)
+      : 0;
+
+    const stats = {
+      totalEvaluations,
+      statusBreakdown,
+      typeBreakdown,
+      averageScoresByType,
+      evaluatorActivity,
+      completionRate: parseFloat(completionRate)
+    };
+
+    console.log(`✅ Public statistics calculated: ${totalEvaluations} total evaluations`);
+    res.json(stats);
+
+  } catch (error) {
+    console.error('❌ Error fetching public evaluation statistics:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al obtener estadísticas públicas de evaluaciones',
+      message: error.message
+    });
+  } finally {
+    client.release();
+  }
 });
 
 // Datos de entrevistadores disponibles (basados en los usuarios del sistema de gestión)
@@ -2983,16 +3327,69 @@ app.post('/api/evaluations/assign/:applicationId/:evaluationType/:evaluatorId', 
 });
 
 // Get evaluations by application
-app.get('/api/evaluations/application/:applicationId', (req, res) => {
-  const { applicationId } = req.params;
+app.get('/api/evaluations/application/:applicationId', async (req, res) => {
+  const { applicationId} = req.params;
 
   console.log(`📋 Getting evaluations for application: ${applicationId}`);
 
-  const applicationEvaluations = mockEvaluations.filter(
-    eval => eval.applicationId === parseInt(applicationId)
-  );
+  const client = await dbPool.connect();
+  try {
+    const result = await client.query(`
+      SELECT
+        e.*,
+        u.id as evaluator_user_id,
+        u.first_name as evaluator_first_name,
+        u.last_name as evaluator_last_name,
+        u.email as evaluator_email,
+        u.role as evaluator_role,
+        u.subject as evaluator_subject
+      FROM evaluations e
+      LEFT JOIN users u ON e.evaluator_id = u.id
+      WHERE e.application_id = $1
+      ORDER BY e.created_at DESC
+    `, [applicationId]);
 
-  res.json(applicationEvaluations);
+    const evaluations = result.rows.map(row => ({
+      id: row.id,
+      evaluationType: row.evaluation_type,
+      status: row.status,
+      score: row.score,
+      grade: row.grade,
+      applicationId: row.application_id,
+      evaluatorId: row.evaluator_id,
+      evaluationDate: row.evaluation_date,
+      completionDate: row.completion_date,
+      observations: row.observations,
+      strengths: row.strengths,
+      areasForImprovement: row.areas_for_improvement,
+      recommendations: row.recommendations,
+      academicReadiness: row.academic_readiness,
+      socialSkillsAssessment: row.social_skills_assessment,
+      emotionalMaturity: row.emotional_maturity,
+      behavioralAssessment: row.behavioral_assessment,
+      motivationAssessment: row.motivation_assessment,
+      familySupportAssessment: row.family_support_assessment,
+      integrationPotential: row.integration_potential,
+      finalRecommendation: row.final_recommendation,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      evaluator: {
+        id: row.evaluator_user_id,
+        firstName: row.evaluator_first_name,
+        lastName: row.evaluator_last_name,
+        email: row.evaluator_email,
+        role: row.evaluator_role,
+        subject: row.evaluator_subject
+      }
+    }));
+
+    client.release();
+    res.json(evaluations);
+  } catch (error) {
+    client.release();
+    console.error('❌ Error getting evaluations for application:', error);
+    res.status(500).json({ error: 'Error al obtener evaluaciones de la aplicación' });
+  }
 });
 
 // Get detailed evaluations by application
@@ -3197,7 +3594,7 @@ app.get('/api/evaluations/:evaluationId', async (req, res) => {
       return res.status(404).json({ error: 'Evaluation not found' });
     }
 
-    res.json(result.rows[0]);
+    res.json({ success: true, data: result.rows[0] });
 
   } catch (error) {
     console.error('❌ Error fetching evaluation:', error);
@@ -3422,78 +3819,6 @@ app.put('/api/evaluations/:evaluationId/reassign/:newEvaluatorId', (req, res) =>
   } else {
     res.status(404).json({ error: 'Evaluation not found' });
   }
-});
-
-// Get evaluation statistics
-app.get('/api/evaluations/statistics', (req, res) => {
-  console.log('📊 Getting evaluation statistics');
-
-  const stats = {
-    totalEvaluations: mockEvaluations.length,
-    statusBreakdown: {
-      PENDING: mockEvaluations.filter(e => e.status === 'PENDING').length,
-      IN_PROGRESS: mockEvaluations.filter(e => e.status === 'IN_PROGRESS').length,
-      COMPLETED: mockEvaluations.filter(e => e.status === 'COMPLETED').length
-    },
-    typeBreakdown: {
-      LANGUAGE_EXAM: mockEvaluations.filter(e => e.evaluationType === 'LANGUAGE_EXAM').length,
-      MATHEMATICS_EXAM: mockEvaluations.filter(e => e.evaluationType === 'MATHEMATICS_EXAM').length,
-      ENGLISH_EXAM: mockEvaluations.filter(e => e.evaluationType === 'ENGLISH_EXAM').length,
-      CYCLE_DIRECTOR_REPORT: mockEvaluations.filter(e => e.evaluationType === 'CYCLE_DIRECTOR_REPORT').length,
-      PSYCHOLOGICAL_INTERVIEW: mockEvaluations.filter(e => e.evaluationType === 'PSYCHOLOGICAL_INTERVIEW').length
-    },
-    averageScoresByType: {
-      LANGUAGE_EXAM: 85,
-      MATHEMATICS_EXAM: 88,
-      ENGLISH_EXAM: 82
-    },
-    evaluatorActivity: {
-      'Ana García': 5,
-      'Carlos López': 3,
-      'María Rodríguez': 7,
-      'Pedro Martínez': 4
-    },
-    completionRate: mockEvaluations.length > 0 ?
-      (mockEvaluations.filter(e => e.status === 'COMPLETED').length / mockEvaluations.length) * 100 : 0
-  };
-
-  res.json(stats);
-});
-
-// Get evaluation statistics (public endpoint)
-app.get('/api/evaluations/public/statistics', (req, res) => {
-  console.log('📊 Getting evaluation statistics (public)');
-
-  const stats = {
-    totalEvaluations: mockEvaluations.length,
-    statusBreakdown: {
-      PENDING: mockEvaluations.filter(e => e.status === 'PENDING').length,
-      IN_PROGRESS: mockEvaluations.filter(e => e.status === 'IN_PROGRESS').length,
-      COMPLETED: mockEvaluations.filter(e => e.status === 'COMPLETED').length
-    },
-    typeBreakdown: {
-      LANGUAGE_EXAM: mockEvaluations.filter(e => e.evaluationType === 'LANGUAGE_EXAM').length,
-      MATHEMATICS_EXAM: mockEvaluations.filter(e => e.evaluationType === 'MATHEMATICS_EXAM').length,
-      ENGLISH_EXAM: mockEvaluations.filter(e => e.evaluationType === 'ENGLISH_EXAM').length,
-      CYCLE_DIRECTOR_REPORT: mockEvaluations.filter(e => e.evaluationType === 'CYCLE_DIRECTOR_REPORT').length,
-      PSYCHOLOGICAL_INTERVIEW: mockEvaluations.filter(e => e.evaluationType === 'PSYCHOLOGICAL_INTERVIEW').length
-    },
-    averageScoresByType: {
-      LANGUAGE_EXAM: 85,
-      MATHEMATICS_EXAM: 88,
-      ENGLISH_EXAM: 82
-    },
-    evaluatorActivity: {
-      'Ana García': 5,
-      'Carlos López': 3,
-      'María Rodríguez': 7,
-      'Pedro Martínez': 4
-    },
-    completionRate: mockEvaluations.length > 0 ?
-      (mockEvaluations.filter(e => e.status === 'COMPLETED').length / mockEvaluations.length) * 100 : 0
-  };
-
-  res.json(stats);
 });
 
 // ============= HU-6: FILE ATTACHMENTS FOR EVALUATIONS =============
