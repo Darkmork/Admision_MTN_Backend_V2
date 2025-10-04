@@ -44,6 +44,15 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
 
+      - name: Setup environment file
+        run: |
+          if [ -f ".env.example" ]; then
+            cp .env.example .env
+            echo "✅ .env file created from .env.example"
+          else
+            echo "⚠️  .env.example not found, skipping"
+          fi
+
       - name: Install dependencies
         run: npm ci
 
