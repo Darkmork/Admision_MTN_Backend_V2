@@ -1944,8 +1944,8 @@ app.post('/api/applications', authenticateToken, validateApplicationInput, async
   }
 });
 
-// Update application with real database integration
-app.put('/api/applications/:id', authenticateToken, validateApplicationInput, async (req, res) => {
+// Update application with real database integration (no validation middleware - uses nested structure)
+app.put('/api/applications/:id', authenticateToken, async (req, res) => {
   const applicationId = parseInt(req.params.id);
 
   if (!applicationId || isNaN(applicationId)) {
@@ -2046,18 +2046,17 @@ app.put('/api/applications/:id', authenticateToken, validateApplicationInput, as
       // Update father if provided
       if (father && existingApp.father_id) {
         const fatherUpdateQuery = `
-          UPDATE parents SET 
+          UPDATE parents SET
             full_name = COALESCE($1, full_name),
             rut = COALESCE($2, rut),
             email = COALESCE($3, email),
             phone = COALESCE($4, phone),
             profession = COALESCE($5, profession),
             address = COALESCE($6, address),
-            workplace = COALESCE($7, workplace),
             updated_at = NOW()
-          WHERE id = $8
+          WHERE id = $7
         `;
-        
+
         await client.query(fatherUpdateQuery, [
           father.fullName,
           father.rut,
@@ -2065,7 +2064,6 @@ app.put('/api/applications/:id', authenticateToken, validateApplicationInput, as
           father.phone,
           father.profession || father.occupation,
           father.address,
-          father.workplace || father.workPlace,
           existingApp.father_id
         ]);
       }
@@ -2073,18 +2071,17 @@ app.put('/api/applications/:id', authenticateToken, validateApplicationInput, as
       // Update mother if provided
       if (mother && existingApp.mother_id) {
         const motherUpdateQuery = `
-          UPDATE parents SET 
+          UPDATE parents SET
             full_name = COALESCE($1, full_name),
             rut = COALESCE($2, rut),
             email = COALESCE($3, email),
             phone = COALESCE($4, phone),
             profession = COALESCE($5, profession),
             address = COALESCE($6, address),
-            workplace = COALESCE($7, workplace),
             updated_at = NOW()
-          WHERE id = $8
+          WHERE id = $7
         `;
-        
+
         await client.query(motherUpdateQuery, [
           mother.fullName,
           mother.rut,
@@ -2092,7 +2089,6 @@ app.put('/api/applications/:id', authenticateToken, validateApplicationInput, as
           mother.phone,
           mother.profession || mother.occupation,
           mother.address,
-          mother.workplace || mother.workPlace,
           existingApp.mother_id
         ]);
       }
