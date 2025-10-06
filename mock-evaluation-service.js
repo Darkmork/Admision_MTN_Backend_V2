@@ -2,6 +2,7 @@ const express = require('express');
 const { Pool } = require('pg');
 const CircuitBreaker = require('opossum');
 const axios = require('axios');
+const { translateToSpanish, translateArrayToSpanish } = require('./translations');
 const app = express();
 const port = 8084;
 
@@ -164,6 +165,61 @@ class SimpleCache {
 
 // Initialize cache
 const evaluationCache = new SimpleCache();
+
+// ============================================================================
+// TRANSLATION HELPERS
+// ============================================================================
+
+/**
+ * Traduce un objeto de entrevista al español
+ * @param {Object} interview - Objeto de entrevista
+ * @returns {Object} Entrevista con campos traducidos
+ */
+function translateInterview(interview) {
+  if (!interview) return interview;
+
+  return {
+    ...interview,
+    status: translateToSpanish(interview.status, 'interview_status')
+    // DO NOT translate type - frontend expects English enum values
+    // type: translateToSpanish(interview.type, 'interview_type')
+  };
+}
+
+/**
+ * Traduce un array de entrevistas al español
+ * @param {Array} interviews - Array de entrevistas
+ * @returns {Array} Entrevistas traducidas
+ */
+function translateInterviews(interviews) {
+  if (!Array.isArray(interviews)) return interviews;
+  return interviews.map(translateInterview);
+}
+
+/**
+ * Traduce un objeto de evaluación al español
+ * @param {Object} evaluation - Objeto de evaluación
+ * @returns {Object} Evaluación con campos traducidos
+ */
+function translateEvaluation(evaluation) {
+  if (!evaluation) return evaluation;
+
+  return {
+    ...evaluation,
+    status: translateToSpanish(evaluation.status, 'evaluation_status'),
+    type: translateToSpanish(evaluation.type, 'evaluation_type')
+  };
+}
+
+/**
+ * Traduce un array de evaluaciones al español
+ * @param {Array} evaluations - Array de evaluaciones
+ * @returns {Array} Evaluaciones traducidas
+ */
+function translateEvaluations(evaluations) {
+  if (!Array.isArray(evaluations)) return evaluations;
+  return evaluations.map(translateEvaluation);
+}
 
 // Periodic cleanup of expired entries (every 5 minutes)
 setInterval(() => {
@@ -1246,8 +1302,51 @@ app.post('/api/interviews', async (req, res) => {
   }
 
   const client = await dbPool.connect();
+  let clientReleased = false;
   try {
-    // 🔒 VALIDACIÓN CRÍTICA: Verificar que el slot no esté ocupado
+    // ✅ VALIDACIÓN 1: Verificar que no exista una entrevista activa del mismo tipo
+    console.log(`🔍 Verificando si existe entrevista ${type} para aplicación ${applicationId}...`);
+    const existingInterviewQuery = await client.query(
+      `SELECT id, interview_type, status, scheduled_date
+       FROM interviews
+       WHERE application_id = $1
+         AND interview_type = $2
+         AND status NOT IN ('CANCELLED', 'NO_SHOW')
+       LIMIT 1`,
+      [parseInt(applicationId), type]
+    );
+
+    if (existingInterviewQuery.rows.length > 0) {
+      const existing = existingInterviewQuery.rows[0];
+      const typeLabels = {
+        'INDIVIDUAL': 'Individual',
+        'FAMILY': 'Familiar',
+        'PSYCHOLOGICAL': 'Psicológica',
+        'ACADEMIC': 'Académica',
+        'BEHAVIORAL': 'Conductual'
+      };
+
+      console.log(`❌ Ya existe entrevista ${type} activa (ID: ${existing.id})`);
+
+      client.release();
+      clientReleased = true;
+      return res.status(409).json({
+        success: false,
+        error: `Ya existe una entrevista ${typeLabels[type]} activa para esta aplicación`,
+        details: {
+          existingInterviewId: existing.id,
+          type: existing.interview_type,
+          status: existing.status,
+          scheduledDate: existing.scheduled_date,
+          message: `Para agendar una nueva entrevista ${typeLabels[type]}, primero debe cancelar la entrevista existente (ID: ${existing.id})`
+        },
+        code: 'DUPLICATE_INTERVIEW_TYPE'
+      });
+    }
+
+    console.log(`✅ No existe entrevista ${type} activa, continuando...`);
+
+    // 🔒 VALIDACIÓN 2: Verificar que el slot no esté ocupado
     const conflictQuery = `
       SELECT id, scheduled_date, status
       FROM interviews
@@ -1319,12 +1418,97 @@ app.post('/api/interviews', async (req, res) => {
 
     console.log('✅ Entrevista creada exitosamente:', newInterview);
 
-    // 📧 PASO 2: Enviar notificaciones por email (async, no bloquear respuesta)
-    (async () => {
+    // 📊 PASO 2: Obtener datos completos para respuesta (studentName, interviewerName, etc.)
+    const fullDataQuery = `
+      SELECT
+        i.id,
+        i.application_id as "applicationId",
+        i.interviewer_id as "interviewerId",
+        i.scheduled_date as "scheduledDate",
+        i.duration_minutes as duration,
+        i.interview_type as type,
+        i.status,
+        i.notes,
+        i.location,
+        i.created_at as "createdAt",
+        i.updated_at as "updatedAt",
+        CONCAT(s.first_name, ' ', s.paternal_last_name, ' ', COALESCE(s.maternal_last_name, '')) as "studentName",
+        g.full_name as "parentNames",
+        s.grade_applied as "gradeApplied",
+        CONCAT(u.first_name, ' ', u.last_name) as "interviewerName"
+      FROM interviews i
+      JOIN applications a ON i.application_id = a.id
+      JOIN students s ON a.student_id = s.id
+      JOIN guardians g ON a.guardian_id = g.id
+      JOIN users u ON i.interviewer_id = u.id
+      WHERE i.id = $1
+    `;
+
+    const fullDataResult = await client.query(fullDataQuery, [newInterview.id]);
+    const interviewData = fullDataResult.rows[0];
+
+    console.log('📋 Datos completos de entrevista para respuesta:', interviewData);
+
+    // También agregar al array en memoria para compatibilidad con otros endpoints
+    interviews.push({
+      id: interviewData.id,
+      applicationId: interviewData.applicationId,
+      interviewerId: interviewData.interviewerId,
+      scheduledDate: interviewData.scheduledDate,
+      duration: interviewData.duration,
+      type: interviewData.type,
+      mode: mode || 'IN_PERSON',
+      status: interviewData.status,
+      location: interviewData.location,
+      notes: interviewData.notes,
+      createdAt: interviewData.createdAt,
+      studentName: interviewData.studentName,
+      interviewerName: interviewData.interviewerName,
+      parentNames: interviewData.parentNames,
+      gradeApplied: interviewData.gradeApplied
+    });
+
+    // PASO 3: Retornar respuesta inmediatamente
+    res.status(201).json({
+      id: parseInt(interviewData.id),
+      applicationId: parseInt(interviewData.applicationId),
+      studentName: interviewData.studentName,
+      parentNames: interviewData.parentNames,
+      gradeApplied: interviewData.gradeApplied,
+      interviewerId: parseInt(interviewData.interviewerId),
+      interviewerName: interviewData.interviewerName,
+      status: interviewData.status,
+      type: interviewData.type,
+      mode: mode || 'IN_PERSON',
+      scheduledDate: interviewData.scheduledDate,
+      scheduledTime: scheduledTime || '00:00',
+      duration: interviewData.duration,
+      location: interviewData.location || '',
+      virtualMeetingLink: '',
+      notes: interviewData.notes || '',
+      preparation: '',
+      result: null,
+      score: null,
+      recommendations: '',
+      followUpRequired: false,
+      followUpNotes: '',
+      createdAt: interviewData.createdAt,
+      updatedAt: interviewData.updatedAt,
+      completedAt: null,
+      isUpcoming: true,
+      isOverdue: false,
+      canBeCompleted: interviewData.status === 'CONFIRMED' || interviewData.status === 'SCHEDULED',
+      canBeEdited: interviewData.status !== 'COMPLETED' && interviewData.status !== 'CANCELLED',
+      canBeCancelled: interviewData.status !== 'COMPLETED' && interviewData.status !== 'CANCELLED'
+    });
+
+    // 📧 PASO 4: Enviar notificaciones DESPUÉS de responder (en background)
+    setImmediate(async () => {
+      const notifClient = await dbPool.connect();
       try {
         // Obtener datos del apoderado y entrevistador para emails
-        const guardiansQuery = await client.query(
-          `SELECT g.email, g.first_name, g.last_name, s.first_name as student_name, s.paternal_last_name as student_lastname
+        const guardiansQuery = await notifClient.query(
+          `SELECT g.email, g.full_name, s.first_name as student_name, s.paternal_last_name as student_lastname
            FROM applications a
            JOIN guardians g ON a.guardian_id = g.id
            JOIN students s ON a.student_id = s.id
@@ -1332,7 +1516,7 @@ app.post('/api/interviews', async (req, res) => {
           [parseInt(applicationId)]
         );
 
-        const interviewerQuery = await client.query(
+        const interviewerQuery = await notifClient.query(
           `SELECT email, first_name, last_name
            FROM users
            WHERE id = $1`,
@@ -1348,13 +1532,13 @@ app.post('/api/interviews', async (req, res) => {
           const dateStr = interviewDate.toLocaleDateString('es-CL');
           const timeStr = interviewDate.toLocaleTimeString('es-CL', { hour: '2-digit', minute: '2-digit' });
 
-          // Enviar email al apoderado
-          const guardianPayload = {
+          // Enviar email al apoderado (sin await para no bloquear)
+          axios.post('http://localhost:8085/api/notifications/send', {
             to: guardian.email,
             subject: `Entrevista Agendada - ${guardian.student_name} ${guardian.student_lastname}`,
             type: 'interview_scheduled_guardian',
             data: {
-              guardianName: `${guardian.first_name} ${guardian.last_name}`,
+              guardianName: guardian.full_name,
               studentName: `${guardian.student_name} ${guardian.student_lastname}`,
               interviewType: type,
               interviewDate: dateStr,
@@ -1363,70 +1547,33 @@ app.post('/api/interviews', async (req, res) => {
               interviewerName: interviewer ? `${interviewer.first_name} ${interviewer.last_name}` : 'Por confirmar',
               duration: newInterview.duration
             }
-          };
+          }).catch(err => console.error('Error enviando email a apoderado:', err.message));
 
-          console.log('📧 Enviando email al apoderado:', guardian.email);
-          await axios.post('http://localhost:8085/api/notifications/send', guardianPayload);
-
-          // Enviar email al entrevistador
+          // Enviar email al entrevistador (sin await para no bloquear)
           if (interviewer) {
-            const interviewerPayload = {
+            axios.post('http://localhost:8085/api/notifications/send', {
               to: interviewer.email,
               subject: `Nueva Entrevista Asignada - ${guardian.student_name} ${guardian.student_lastname}`,
               type: 'interview_scheduled_interviewer',
               data: {
                 interviewerName: `${interviewer.first_name} ${interviewer.last_name}`,
                 studentName: `${guardian.student_name} ${guardian.student_lastname}`,
-                guardianName: `${guardian.first_name} ${guardian.last_name}`,
+                guardianName: guardian.full_name,
                 interviewType: type,
                 interviewDate: dateStr,
                 interviewTime: timeStr,
                 location: newInterview.location,
                 duration: newInterview.duration
               }
-            };
-
-            console.log('📧 Enviando email al entrevistador:', interviewer.email);
-            await axios.post('http://localhost:8085/api/notifications/send', interviewerPayload);
+            }).catch(err => console.error('Error enviando email a entrevistador:', err.message));
           }
 
-          console.log('✅ Notificaciones enviadas correctamente');
+          console.log('✅ Notificaciones iniciadas en segundo plano');
         }
       } catch (emailError) {
-        console.error('⚠️ Error enviando notificaciones (no crítico):', emailError.message);
-        // No fallar la creación de entrevista si falla el email
-      }
-    })();
-
-    // También agregar al array en memoria para compatibilidad con otros endpoints
-    interviews.push({
-      id: newInterview.id,
-      applicationId: newInterview.applicationId,
-      interviewerId: newInterview.interviewerId,
-      scheduledDate: newInterview.scheduledDate,
-      duration: newInterview.duration,
-      type: newInterview.type,
-      mode: mode || 'IN_PERSON',
-      status: newInterview.status,
-      location: newInterview.location,
-      notes: newInterview.notes,
-      createdAt: newInterview.createdAt
-    });
-
-    res.status(201).json({
-      success: true,
-      data: {
-        id: newInterview.id,
-        applicationId: newInterview.applicationId,
-        interviewerId: newInterview.interviewerId,
-        scheduledDate: newInterview.scheduledDate,
-        duration: newInterview.duration,
-        type: newInterview.type,
-        mode: mode || 'IN_PERSON',
-        status: newInterview.status,
-        location: newInterview.location,
-        notes: newInterview.notes,
-        createdAt: newInterview.createdAt
+        console.error('⚠️ Error preparando notificaciones:', emailError.message);
+      } finally {
+        notifClient.release();
       }
     });
 
@@ -1468,7 +1615,9 @@ app.post('/api/interviews', async (req, res) => {
       details: error.message
     });
   } finally {
-    client.release();
+    if (!clientReleased) {
+      client.release();
+    }
   }
 });
 
@@ -1561,10 +1710,13 @@ app.get('/api/interviews', async (req, res) => {
       };
     });
 
+    // Traducir estados y tipos al español antes de devolver
+    const translatedInterviews = translateInterviews(formattedInterviews);
+
     res.json({
       success: true,
-      data: formattedInterviews,
-      count: formattedInterviews.length
+      data: translatedInterviews,
+      count: translatedInterviews.length
     });
   } catch (error) {
     console.error('Database error:', error);
@@ -3339,6 +3491,138 @@ app.post('/api/interviews/create-validated', async (req, res) => {
   }
 });
 
+// Manual endpoint to send interview summary email
+app.post('/api/interviews/application/:applicationId/send-summary', async (req, res) => {
+  const { applicationId } = req.params;
+
+  console.log(`📧 Enviando resumen de entrevistas para aplicación ${applicationId}`);
+
+  const client = await dbPool.connect();
+  try {
+    // 1. Verificar que todas las entrevistas requeridas estén agendadas
+    const allInterviewsQuery = await client.query(
+      `SELECT
+        i.id, i.interview_type, i.scheduled_date, i.duration_minutes, i.location,
+        u.first_name || ' ' || u.last_name as interviewer_name
+       FROM interviews i
+       JOIN users u ON i.interviewer_id = u.id
+       WHERE i.application_id = $1 AND i.status = 'SCHEDULED'
+       ORDER BY i.scheduled_date`,
+      [parseInt(applicationId)]
+    );
+
+    const requiredTypes = ['INDIVIDUAL', 'FAMILY', 'PSYCHOLOGICAL'];
+    const scheduledTypes = allInterviewsQuery.rows.map(r => r.interview_type);
+    const allRequiredScheduled = requiredTypes.every(type => scheduledTypes.includes(type));
+
+    if (!allRequiredScheduled) {
+      const missingTypes = requiredTypes.filter(type => !scheduledTypes.includes(type));
+      return res.status(400).json({
+        success: false,
+        error: 'No todas las entrevistas requeridas están agendadas',
+        details: {
+          required: requiredTypes,
+          scheduled: scheduledTypes,
+          missing: missingTypes
+        }
+      });
+    }
+
+    // 2. Obtener datos del estudiante y apoderado (usuario que creó la aplicación)
+    const studentQuery = await client.query(
+      `SELECT
+        a.id as application_id,
+        s.first_name || ' ' || s.paternal_last_name || ' ' || s.maternal_last_name as student_name,
+        u.email as applicant_email,
+        u.first_name || ' ' || u.last_name as applicant_name
+       FROM applications a
+       JOIN students s ON a.student_id = s.id
+       LEFT JOIN users u ON a.applicant_user_id = u.id
+       WHERE a.id = $1`,
+      [parseInt(applicationId)]
+    );
+
+    if (studentQuery.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Aplicación no encontrada'
+      });
+    }
+
+    const applicationData = studentQuery.rows[0];
+
+    // Validar que exista el apoderado
+    if (!applicationData.applicant_email) {
+      return res.status(400).json({
+        success: false,
+        error: 'No se encontró el apoderado que creó la aplicación'
+      });
+    }
+
+    // 3. Formatear datos de las entrevistas para el email
+    const interviews = allInterviewsQuery.rows.map(interview => {
+      const dateObj = new Date(interview.scheduled_date);
+      return {
+        type: interview.interview_type,
+        date: dateObj.toLocaleDateString('es-CL', {
+          weekday: 'long',
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        }),
+        time: dateObj.toLocaleTimeString('es-CL', {
+          hour: '2-digit',
+          minute: '2-digit'
+        }),
+        duration: interview.duration_minutes,
+        location: interview.location,
+        interviewer: interview.interviewer_name
+      };
+    });
+
+    // 4. Enviar el email al apoderado que creó la aplicación
+    console.log(`📬 Enviando email a ${applicationData.applicant_email}...`);
+
+    const emailResponse = await axios.post('http://localhost:8085/api/notifications/send', {
+      type: 'email',
+      recipient: applicationData.applicant_email,
+      subject: `Resumen de Entrevistas Agendadas - ${applicationData.student_name}`,
+      template: 'all_interviews_scheduled',
+      templateData: {
+        guardianName: applicationData.applicant_name,
+        studentName: applicationData.student_name,
+        totalInterviews: interviews.length,
+        interviews: interviews
+      }
+    });
+
+    console.log('✅ Email de resumen enviado exitosamente');
+
+    res.status(200).json({
+      success: true,
+      message: 'Resumen de entrevistas enviado exitosamente',
+      data: {
+        applicationId: parseInt(applicationId),
+        applicantEmail: applicationData.applicant_email,
+        applicantName: applicationData.applicant_name,
+        totalInterviews: interviews.length,
+        interviewsSent: interviews.length,
+        emailStatus: emailResponse.data
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error enviando resumen de entrevistas:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error enviando resumen de entrevistas',
+      details: error.message
+    });
+  } finally {
+    client.release();
+  }
+});
+
 // ===================================
 // EVALUATION MANAGEMENT ENDPOINTS
 // ===================================
@@ -3638,6 +3922,25 @@ app.post('/api/evaluations/assign/:applicationId/:evaluationType/:evaluatorId', 
 
   const client = await dbPool.connect();
   try {
+    // Check if evaluation already exists
+    const existingEvalQuery = `
+      SELECT id FROM evaluations
+      WHERE application_id = $1 AND evaluation_type = $2
+    `;
+
+    const existingEval = await client.query(existingEvalQuery, [
+      parseInt(applicationId),
+      evaluationType
+    ]);
+
+    if (existingEval.rows.length > 0) {
+      client.release();
+      return res.status(409).json({
+        error: 'Ya existe una evaluación de este tipo para esta aplicación',
+        existingEvaluationId: existingEval.rows[0].id
+      });
+    }
+
     // Insert evaluation into database
     const insertQuery = `
       INSERT INTO evaluations (
@@ -3888,7 +4191,7 @@ app.put('/api/evaluations/:evaluationId', async (req, res) => {
 
     // Build dynamic UPDATE query based on provided fields
     const allowedFields = [
-      'score', 'grade', 'observations', 'status',
+      'score', 'max_score', 'grade', 'observations', 'status',
       'academic_readiness', 'behavioral_assessment', 'emotional_maturity',
       'social_skills_assessment', 'motivation_assessment', 'family_support_assessment',
       'integration_potential', 'strengths', 'areas_for_improvement',
@@ -3900,8 +4203,8 @@ app.put('/api/evaluations/:evaluationId', async (req, res) => {
     let paramIndex = 1;
 
     // Map camelCase to snake_case for compatibility
-    // NOTE: maxScore is frontend-only (for UI display), not stored in database
     const fieldMapping = {
+      'maxScore': 'max_score',
       'areasForImprovement': 'areas_for_improvement'
     };
 
@@ -3982,6 +4285,7 @@ app.get('/api/evaluations/:evaluationId', async (req, res) => {
         e.evaluator_id,
         e.evaluation_type,
         e.score,
+        e.max_score,
         e.grade,
         e.observations,
         e.status,
