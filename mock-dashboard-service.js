@@ -1,6 +1,7 @@
 const express = require('express');
 const { Pool } = require('pg');
 const CircuitBreaker = require('opossum');
+const { translateToSpanish } = require('./translations');
 const app = express();
 const port = 8086;
 
@@ -525,9 +526,9 @@ app.get('/api/dashboard/upcoming-interviews', async (req, res) => {
       evaluatorName: interview.evaluator_name,
       scheduledDate: interview.scheduled_date.toISOString().split('T')[0],
       scheduledTime: interview.scheduled_date.toISOString().split('T')[1].substring(0, 5),
-      type: interview.type,
+      type: translateToSpanish(interview.type, 'interview_type'),
       mode: interview.mode,
-      status: interview.status
+      status: translateToSpanish(interview.status, 'interview_status')
     }));
 
     res.json({
@@ -828,8 +829,9 @@ app.get('/api/analytics/status-distribution', async (req, res) => {
     const statusPercentages = {};
 
     stats.rows.forEach(row => {
-      statusCount[row.status] = parseInt(row.count);
-      statusPercentages[row.status] = totalApplications > 0
+      const translatedStatus = translateToSpanish(row.status, 'application_status');
+      statusCount[translatedStatus] = parseInt(row.count);
+      statusPercentages[translatedStatus] = totalApplications > 0
         ? Math.round((parseInt(row.count) / totalApplications) * 100 * 100) / 100
         : 0;
     });

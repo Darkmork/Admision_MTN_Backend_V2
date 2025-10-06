@@ -1,9 +1,167 @@
 const express = require('express');
+const cookieParser = require('cookie-parser');
 const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const CircuitBreaker = require('opossum');
+const crypto = require('crypto');
+const { translateToSpanish } = require('./translations');
 const app = express();
 const port = 8082;
+
+// ============= CUSTOM CSRF PROTECTION - DOUBLE-SUBMIT COOKIE PATTERN =============
+// Simple, reliable implementation that won't crash on startup
+const CSRF_COOKIE_NAME = 'csrf_cookie';
+const CSRF_HEADER_NAME = 'x-csrf-token';
+const CSRF_TOKEN_LENGTH = 64;
+
+// Generate cryptographically secure random token
+function generateCsrfToken() {
+  return crypto.randomBytes(CSRF_TOKEN_LENGTH).toString('hex');
+}
+
+// CSRF validation middleware
+function csrfProtection(req, res, next) {
+  const method = req.method.toUpperCase();
+
+  // Skip validation for safe HTTP methods
+  if (['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+    return next();
+  }
+
+  // Get token from cookie and header
+  const cookieToken = req.cookies[CSRF_COOKIE_NAME];
+  const headerToken = req.headers[CSRF_HEADER_NAME] || req.headers['csrf-token'];
+
+  console.log(`[CSRF] Validation - Method: ${method}, Cookie: ${cookieToken ? 'present' : 'missing'}, Header: ${headerToken ? 'present' : 'missing'}`);
+
+  // Validate token match
+  if (!cookieToken || !headerToken) {
+    console.log('[CSRF] ❌ CSRF token missing');
+    return res.status(403).json({
+      error: 'CSRF token missing',
+      code: 'CSRF_TOKEN_MISSING',
+      message: 'CSRF token is required for this request. Call GET /api/auth/csrf-token first.'
+    });
+  }
+
+  if (cookieToken !== headerToken) {
+    console.log('[CSRF] ❌ CSRF token mismatch');
+    return res.status(403).json({
+      error: 'CSRF token invalid',
+      code: 'CSRF_TOKEN_INVALID',
+      message: 'CSRF token validation failed. Token mismatch between cookie and header.'
+    });
+  }
+
+  console.log('[CSRF] ✅ CSRF validation passed');
+  next();
+}
+
+// ============= CREDENTIAL ENCRYPTION - RSA + AES HYBRID =============
+// RSA-2048 key pair for encrypting credentials in transit
+// Keys rotate every 24 hours for enhanced security
+let rsaKeyPair = null;
+let keyRotationTime = null;
+const KEY_ROTATION_INTERVAL = 24 * 60 * 60 * 1000; // 24 hours
+
+// Generate RSA key pair
+function generateRSAKeyPair() {
+  console.log('[Encryption] Generating new RSA-2048 key pair...');
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    publicKeyEncoding: {
+      type: 'spki',
+      format: 'pem'
+    },
+    privateKeyEncoding: {
+      type: 'pkcs8',
+      format: 'pem'
+    }
+  });
+
+  keyRotationTime = Date.now();
+  console.log('[Encryption] RSA key pair generated successfully');
+
+  return { publicKey, privateKey };
+}
+
+// Initialize RSA keys on startup
+rsaKeyPair = generateRSAKeyPair();
+
+// Rotate keys every 24 hours
+setInterval(() => {
+  const oldKeyCount = rsaKeyPair ? 1 : 0;
+  rsaKeyPair = generateRSAKeyPair();
+  console.log(`[Encryption] Keys rotated. Previous keys: ${oldKeyCount}`);
+}, KEY_ROTATION_INTERVAL);
+
+// Decryption middleware - decrypts RSA + AES encrypted credentials
+function decryptCredentials(req, res, next) {
+  // Skip decryption if request is not encrypted
+  if (!req.body.encryptedData || !req.body.encryptedKey) {
+    // Allow plain text for backward compatibility during migration
+    console.log('[Encryption] Plain text credentials detected (backward compatibility mode)');
+    return next();
+  }
+
+  try {
+    const { encryptedData, encryptedKey, iv, authTag } = req.body;
+
+    // Validate all required fields
+    if (!encryptedData || !encryptedKey || !iv || !authTag) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid encrypted payload',
+        code: 'ENCRYPTION_INVALID_PAYLOAD'
+      });
+    }
+
+    // Step 1: Decrypt AES key with RSA private key
+    const aesKey = crypto.privateDecrypt(
+      {
+        key: rsaKeyPair.privateKey,
+        padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+        oaepHash: 'sha256'
+      },
+      Buffer.from(encryptedKey, 'base64')
+    );
+
+    // Step 2: Decrypt credentials with AES key
+    const decipher = crypto.createDecipheriv(
+      'aes-256-gcm',
+      aesKey,
+      Buffer.from(iv, 'base64')
+    );
+
+    decipher.setAuthTag(Buffer.from(authTag, 'base64'));
+
+    let decrypted = Buffer.concat([
+      decipher.update(Buffer.from(encryptedData, 'base64')),
+      decipher.final()
+    ]);
+
+    // Parse decrypted credentials
+    const credentials = JSON.parse(decrypted.toString('utf8'));
+
+    // Replace request body with decrypted credentials
+    req.body = credentials;
+
+    console.log('[Encryption] Credentials decrypted successfully');
+    next();
+
+  } catch (error) {
+    console.error('[Encryption] Decryption failed:', error.message);
+
+    // Rate limiting: Log suspicious decryption attempts
+    // In production, implement IP-based rate limiting here
+
+    return res.status(400).json({
+      success: false,
+      error: 'Credential decryption failed',
+      code: 'ENCRYPTION_DECRYPTION_FAILED'
+    });
+  }
+}
 
 // Database configuration with connection pooling
 const dbPool = new Pool({
@@ -173,7 +331,13 @@ setInterval(() => {
   }
 }, 300000);
 
+// Add cookie parser and JSON middleware
+app.use(cookieParser());
 app.use(express.json());
+
+// ============= CSRF PROTECTION MIDDLEWARE =============
+// NOTE: Do NOT apply globally - apply selectively to mutation routes
+// GET/HEAD/OPTIONS are automatically ignored by csrf-csrf library
 
 // Middleware to simulate JWT verification
 const authenticateToken = (req, res, next) => {
@@ -207,12 +371,94 @@ const authenticateToken = (req, res, next) => {
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'UP', 
+  res.json({
+    status: 'UP',
     service: 'user-service',
     port: port,
     timestamp: new Date().toISOString()
   });
+});
+
+// ============= CSRF TOKEN GENERATION ENDPOINT =============
+// Public endpoint - generates CSRF token and sets csrf_cookie
+app.get('/api/auth/csrf-token', (req, res) => {
+  try {
+    console.log('[CSRF] Token generation request received');
+
+    // Generate CSRF token
+    const csrfToken = generateCsrfToken();
+
+    // Set cookie with token
+    res.cookie(CSRF_COOKIE_NAME, csrfToken, {
+      httpOnly: false,        // MUST be false so JavaScript can read it for Double-Submit
+      sameSite: 'lax',        // Allows cookies on same-site navigation
+      path: '/',              // Available on all paths
+      secure: false,          // Set to true in production with HTTPS
+      maxAge: 3600000         // 1 hour in milliseconds
+    });
+
+    console.log('[CSRF] Token generated successfully:', csrfToken.substring(0, 20) + '...');
+
+    res.json({
+      success: true,
+      csrfToken: csrfToken,
+      message: 'CSRF token generated successfully',
+      usage: {
+        cookieName: CSRF_COOKIE_NAME,
+        headerName: 'X-CSRF-Token',
+        value: csrfToken,
+        example: 'Include this token in X-CSRF-Token header for POST/PUT/DELETE requests',
+        expiresIn: '1 hour'
+      }
+    });
+  } catch (error) {
+    console.error('[CSRF] ❌ Error generating CSRF token:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error generating CSRF token',
+      details: error.message
+    });
+  }
+});
+
+// ============= RSA PUBLIC KEY ENDPOINT =============
+// Public endpoint - returns RSA public key for client-side encryption
+app.get('/api/auth/public-key', (req, res) => {
+  try {
+    console.log('[Encryption] Public key request received');
+
+    if (!rsaKeyPair || !rsaKeyPair.publicKey) {
+      return res.status(503).json({
+        success: false,
+        error: 'Encryption keys not initialized',
+        code: 'ENCRYPTION_KEYS_NOT_READY'
+      });
+    }
+
+    const keyAge = Date.now() - keyRotationTime;
+    const timeUntilRotation = KEY_ROTATION_INTERVAL - keyAge;
+
+    res.json({
+      success: true,
+      publicKey: rsaKeyPair.publicKey,
+      keyId: keyRotationTime.toString(), // Key identifier for rotation tracking
+      algorithm: 'RSA-OAEP',
+      keySize: 2048,
+      hash: 'SHA-256',
+      usage: 'Encrypt credentials with this key. Use RSA-OAEP with SHA-256 hash.',
+      expiresIn: Math.floor(timeUntilRotation / 1000) + ' seconds',
+      message: 'Use this public key to encrypt login credentials on the client side'
+    });
+
+    console.log('[Encryption] Public key sent successfully');
+  } catch (error) {
+    console.error('[Encryption] ❌ Error sending public key:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error retrieving public key',
+      details: error.message
+    });
+  }
 });
 
 // Global users array - SOLO PERSONAL DEL COLEGIO
@@ -560,14 +806,14 @@ app.get('/api/users', authenticateToken, async (req, res) => {
 
     const result = await dbPool.query(query, params);
 
-    // Transform to match frontend format
+    // Transform to match frontend format and translate roles
     const users = result.rows.map(user => ({
       id: user.id,
       fullName: `${user.firstName} ${user.lastName}`,
       firstName: user.firstName,
       lastName: user.lastName,
       email: user.email,
-      role: user.role,
+      role: translateToSpanish(user.role, 'user_role'),
       subject: user.subject,
       rut: user.rut,
       phone: user.phone,
@@ -593,11 +839,12 @@ app.get('/api/users', authenticateToken, async (req, res) => {
 });
 
 // Public login endpoint - consulta la base de datos PostgreSQL
-app.post('/api/auth/login', async (req, res) => {
+// ============= LOGIN ENDPOINT - CSRF PROTECTED =============
+app.post('/api/auth/login', decryptCredentials, csrfProtection, async (req, res) => {
   const { email, password } = req.body;
-  
+
   // Logging removed for security - console.log('🔐 LOGIN ATTEMPT:', { email, password: password ? '[PROTECTED]' : '[EMPTY]' });
-  
+
   if (!email || !password) {
     // Logging removed for security - console.log('❌ Missing email or password');
     return res.status(400).json({
@@ -651,7 +898,19 @@ app.post('/api/auth/login', async (req, res) => {
       'UPDATE users SET last_login = NOW() WHERE id = $1',
       [user.id]
     );
-    
+
+    // Para usuarios APODERADO, buscar su applicationId
+    let applicationId = null;
+    if (user.role === 'APODERADO') {
+      const applicationQuery = await client.query(
+        'SELECT id FROM applications WHERE applicant_user_id = $1 ORDER BY created_at DESC LIMIT 1',
+        [user.id]
+      );
+      if (applicationQuery.rows.length > 0) {
+        applicationId = applicationQuery.rows[0].id;
+      }
+    }
+
     // Create a proper JWT token with user data
     const header = Buffer.from(JSON.stringify({alg: "HS256", typ: "JWT"})).toString('base64');
     const payload = Buffer.from(JSON.stringify({
@@ -663,10 +922,10 @@ app.post('/api/auth/login', async (req, res) => {
     })).toString('base64');
     const signature = "mock-signature"; // In real app would be HMAC
     const token = `${header}.${payload}.${signature}`;
-    
+
     // Logging removed for security - console.log('✅ Login successful for user:', { id: user.id, email: user.email, role: user.role });
-    
-    res.json({
+
+    const responseData = {
       success: true,
       message: 'Login exitoso',
       token: token,
@@ -674,9 +933,16 @@ app.post('/api/auth/login', async (req, res) => {
       firstName: user.first_name,
       lastName: user.last_name,
       email: user.email,
-      role: user.role,
+      role: user.role, // Fixed: Return role as-is for frontend validation
       subject: user.subject
-    });
+    };
+
+    // Add applicationId if it exists (for APODERADO users)
+    if (applicationId !== null) {
+      responseData.applicationId = applicationId;
+    }
+
+    res.json(responseData);
 
   } catch (error) {
     // Error logging removed for security('💥 Database error during login:', error);
@@ -689,10 +955,10 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-// Public register endpoint for new APODERADO users
-app.post('/api/auth/register', async (req, res) => {
+// Public register endpoint for new APODERADO users - CSRF PROTECTED
+app.post('/api/auth/register', decryptCredentials, csrfProtection, async (req, res) => {
   const { firstName, lastName, email, password, rut, phone } = req.body;
-  
+
   // Validate required fields
   if (!firstName || !lastName || !email || !password) {
     return res.status(400).json({
@@ -795,7 +1061,7 @@ app.post('/api/auth/register', async (req, res) => {
       lastName: newUser.last_name,
       fullName: `${newUser.first_name} ${newUser.last_name}`,
       email: newUser.email,
-      role: newUser.role,
+      role: translateToSpanish(newUser.role, 'user_role'),
       rut: rut ? rut.trim() : null,
       phone: phone ? phone.trim() : null,
       emailVerified: newUser.email_verified,
@@ -807,7 +1073,7 @@ app.post('/api/auth/register', async (req, res) => {
         lastName: newUser.last_name,
         fullName: `${newUser.first_name} ${newUser.last_name}`,
         email: newUser.email,
-        role: newUser.role,
+        role: translateToSpanish(newUser.role, 'user_role'),
         rut: rut ? rut.trim() : null,
         phone: phone ? phone.trim() : null,
         emailVerified: newUser.email_verified,
@@ -859,26 +1125,26 @@ app.get('/api/users/stats', authenticateToken, (req, res) => {
 });
 
 // Update user by ID
-app.put('/api/users/:id', authenticateToken, async (req, res) => {
+// Update user - CSRF PROTECTED
+app.put('/api/users/:id', csrfProtection, authenticateToken, async (req, res) => {
   const userId = parseInt(req.params.id);
-  const userIndex = users.findIndex(u => u.id === userId);
-
-  if (userIndex === -1) {
-    return res.status(404).json({
-      success: false,
-      error: 'User not found'
-    });
-  }
-
   const client = await dbPool.connect();
+
   try {
     console.log('📝 Datos recibidos para actualizar usuario:', JSON.stringify(req.body, null, 2));
 
-    // Get current password from database
+    // Check if user exists in DATABASE first
     const currentUserQuery = await client.query(
-      'SELECT password FROM users WHERE id = $1',
+      'SELECT * FROM users WHERE id = $1',
       [userId]
     );
+
+    if (currentUserQuery.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'User not found'
+      });
+    }
 
     let hashedPassword = currentUserQuery.rows[0].password; // Keep current password by default
 
@@ -887,19 +1153,26 @@ app.put('/api/users/:id', authenticateToken, async (req, res) => {
       hashedPassword = await bcrypt.hash(req.body.password, 10);
     }
 
-    // Update user data in memory
+    // Build updated user object from database data + request body
+    const currentUser = currentUserQuery.rows[0];
     const updatedUser = {
-      ...users[userIndex],
-      ...req.body,
-      id: userId, // Preserve ID
-      password: hashedPassword, // Use hashed password (current or new)
+      id: userId,
+      firstName: req.body.firstName || currentUser.first_name,
+      lastName: req.body.lastName || currentUser.last_name,
       fullName: req.body.firstName && req.body.lastName ?
                 `${req.body.firstName} ${req.body.lastName}`.trim() :
-                users[userIndex].fullName,
+                `${currentUser.first_name} ${currentUser.last_name}`.trim(),
+      email: req.body.email || currentUser.email,
+      password: hashedPassword,
+      role: req.body.role || currentUser.role,
+      active: req.body.active !== undefined ? req.body.active : currentUser.active,
+      emailVerified: req.body.emailVerified !== undefined ? req.body.emailVerified : currentUser.email_verified,
+      rut: req.body.rut || currentUser.rut,
+      phone: req.body.phone || currentUser.phone,
+      subject: req.body.subject || currentUser.subject,
+      educationalLevel: req.body.educationalLevel || currentUser.educational_level,
       updatedAt: new Date().toISOString()
     };
-
-    users[userIndex] = updatedUser;
 
     // ALSO update in database for persistent storage
     const updateUserQuery = `
@@ -936,6 +1209,12 @@ app.put('/api/users/:id', authenticateToken, async (req, res) => {
 
     console.log(`✅ Usuario actualizado en base de datos: ${updatedUser.firstName} ${updatedUser.lastName}`);
 
+    // Update in-memory array for consistency (if user exists there)
+    const userIndex = users.findIndex(u => u.id === userId);
+    if (userIndex !== -1) {
+      users[userIndex] = updatedUser;
+    }
+
     res.json({
       success: true,
       message: 'User updated successfully',
@@ -954,32 +1233,75 @@ app.put('/api/users/:id', authenticateToken, async (req, res) => {
 });
 
 // Delete user by ID
-app.delete('/api/users/:id', authenticateToken, (req, res) => {
+// Delete user - CSRF PROTECTED
+app.delete('/api/users/:id', csrfProtection, authenticateToken, async (req, res) => {
   const userId = parseInt(req.params.id);
-  const userIndex = users.findIndex(u => u.id === userId);
-  
-  if (userIndex === -1) {
-    return res.status(404).json({
+  const client = await dbPool.connect();
+
+  try {
+    // Check if user exists
+    const checkQuery = 'SELECT id, email, role FROM users WHERE id = $1';
+    const checkResult = await client.query(checkQuery, [userId]);
+
+    if (checkResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Usuario no encontrado'
+      });
+    }
+
+    // Attempt to delete from database
+    await client.query('BEGIN');
+
+    try {
+      const deleteQuery = 'DELETE FROM users WHERE id = $1 RETURNING id';
+      const result = await client.query(deleteQuery, [userId]);
+
+      await client.query('COMMIT');
+
+      // Also remove from in-memory array for consistency
+      const userIndex = users.findIndex(u => u.id === userId);
+      if (userIndex !== -1) {
+        users.splice(userIndex, 1);
+      }
+
+      res.json({
+        success: true,
+        message: 'Usuario eliminado correctamente'
+      });
+    } catch (dbError) {
+      await client.query('ROLLBACK');
+
+      // Check if it's a foreign key constraint error
+      if (dbError.code === '23503') {
+        return res.status(409).json({
+          success: false,
+          error: 'No se puede eliminar este usuario porque tiene datos asociados en el sistema (evaluaciones, entrevistas, etc.). Por favor, desactiva el usuario en lugar de eliminarlo.'
+        });
+      }
+
+      throw dbError;
+    }
+  } catch (error) {
+    console.error('Error deleting user:', error);
+    res.status(500).json({
       success: false,
-      error: 'User not found'
+      error: 'Error al eliminar el usuario',
+      details: error.message
     });
+  } finally {
+    client.release();
   }
-  
-  // Remove user from array
-  users.splice(userIndex, 1);
-  
-  res.json({
-    success: true,
-    message: 'User deleted successfully'
-  });
 });
 
-// Create new user
-app.post('/api/users', authenticateToken, async (req, res) => {
+// Create new user - CSRF PROTECTED
+app.post('/api/users', csrfProtection, authenticateToken, async (req, res) => {
+  const client = await dbPool.connect();
+
   try {
-    // Get the highest ID to generate new one
-    const maxId = Math.max(...users.map(u => u.id));
-    const newId = maxId + 1;
+    // Get the highest ID from the DATABASE, not in-memory array
+    const maxIdQuery = await client.query('SELECT COALESCE(MAX(id), 0) as max_id FROM users');
+    const newId = maxIdQuery.rows[0].max_id + 1;
 
     // Hash password if provided
     let hashedPassword = null;
@@ -1006,51 +1328,33 @@ app.post('/api/users', authenticateToken, async (req, res) => {
       updatedAt: new Date().toISOString()
     };
 
-    // Add to users array (for compatibility with mock data)
-    users.push(newUser);
-
-    // ALSO save to database for persistent storage and foreign key constraints
+    // Save to database FIRST (primary source of truth)
     let userSavedToDB = false;
-    const client = await dbPool.connect();
-    try {
-      const insertUserQuery = `
-        INSERT INTO users (id, first_name, last_name, email, password, role, active, email_verified, rut, phone, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
-        ON CONFLICT (id) DO UPDATE SET
-          first_name = EXCLUDED.first_name,
-          last_name = EXCLUDED.last_name,
-          email = EXCLUDED.email,
-          password = EXCLUDED.password,
-          role = EXCLUDED.role,
-          active = EXCLUDED.active,
-          email_verified = EXCLUDED.email_verified,
-          rut = EXCLUDED.rut,
-          phone = EXCLUDED.phone,
-          updated_at = NOW()
-      `;
+    const insertUserQuery = `
+      INSERT INTO users (id, first_name, last_name, email, password, role, active, email_verified, rut, phone, subject, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
+      RETURNING id
+    `;
 
-      await client.query(insertUserQuery, [
-        newUser.id,
-        newUser.firstName,
-        newUser.lastName,
-        newUser.email,
-        newUser.password,
-        newUser.role,
-        newUser.active,
-        newUser.emailVerified,
-        newUser.rut,
-        newUser.phone
-      ]);
+    const result = await client.query(insertUserQuery, [
+      newUser.id,
+      newUser.firstName,
+      newUser.lastName,
+      newUser.email,
+      newUser.password,
+      newUser.role,
+      newUser.active,
+      newUser.emailVerified,
+      newUser.rut,
+      newUser.phone,
+      newUser.subject
+    ]);
 
-      console.log(`✅ Usuario ${newUser.id} guardado en base de datos`);
-      userSavedToDB = true;
+    console.log(`✅ Usuario ${result.rows[0].id} guardado en base de datos`);
+    userSavedToDB = true;
 
-    } catch (dbError) {
-      console.error('❌ Error guardando usuario en base de datos:', dbError);
-      // Don't create schedules if user wasn't saved to database
-    } finally {
-      client.release();
-    }
+    // ONLY add to in-memory array if DB save succeeded
+    users.push(newUser);
 
     // Create schedules for evaluator roles ONLY if user was successfully saved to database
     const evaluatorRoles = ['TEACHER_LANGUAGE', 'TEACHER_MATHEMATICS', 'TEACHER_ENGLISH', 'TEACHER', 'COORDINATOR', 'CYCLE_DIRECTOR', 'PSYCHOLOGIST', 'ADMIN'];
@@ -1079,10 +1383,30 @@ app.post('/api/users', authenticateToken, async (req, res) => {
 
   } catch (error) {
     console.error('❌ Error creating user:', error);
+
+    // Handle duplicate key errors with user-friendly messages
+    if (error.code === '23505') { // PostgreSQL unique violation
+      let errorMessage = 'Ya existe un usuario con esos datos';
+
+      if (error.message.includes('users_email_key') || error.message.includes('email')) {
+        errorMessage = 'Ya existe un usuario con ese correo electrónico';
+      } else if (error.message.includes('users_rut_key') || error.message.includes('rut')) {
+        errorMessage = 'Ya existe un usuario con ese RUT';
+      }
+
+      return res.status(409).json({
+        success: false,
+        error: errorMessage
+      });
+    }
+
     res.status(500).json({
       success: false,
-      error: 'Error interno del servidor al crear usuario'
+      error: 'Error interno del servidor al crear usuario',
+      details: error.message
     });
+  } finally {
+    client.release();
   }
 });
 
@@ -1199,24 +1523,43 @@ app.get('/api/users/me', authenticateToken, async (req, res) => {
 
     const user = userQuery.rows[0];
 
+    // Para usuarios APODERADO, buscar su applicationId
+    let applicationId = null;
+    if (user.role === 'APODERADO') {
+      const applicationQuery = await client.query(
+        'SELECT id FROM applications WHERE applicant_user_id = $1 ORDER BY created_at DESC LIMIT 1',
+        [user.id]
+      );
+      if (applicationQuery.rows.length > 0) {
+        applicationId = applicationQuery.rows[0].id;
+      }
+    }
+
+    const userProfile = {
+      id: user.id,
+      firstName: user.first_name,
+      lastName: user.last_name,
+      fullName: `${user.first_name} ${user.last_name}`,
+      email: user.email,
+      role: translateToSpanish(user.role, 'user_role'),
+      phone: user.phone,
+      rut: user.rut,
+      subject: user.subject,
+      educationalLevel: null,
+      active: user.active,
+      emailVerified: user.email_verified,
+      createdAt: user.created_at
+    };
+
+    // Add applicationId if it exists (for APODERADO users)
+    if (applicationId !== null) {
+      userProfile.applicationId = applicationId;
+    }
+
     // Return user profile without sensitive data
     res.json({
       success: true,
-      user: {
-        id: user.id,
-        firstName: user.first_name,
-        lastName: user.last_name,
-        fullName: `${user.first_name} ${user.last_name}`,
-        email: user.email,
-        role: user.role,
-        phone: user.phone,
-        rut: user.rut,
-        subject: user.subject,
-        educationalLevel: null,
-        active: user.active,
-        emailVerified: user.email_verified,
-        createdAt: user.created_at
-      }
+      user: userProfile
     });
   } catch (error) {
     console.error('Error fetching user profile:', error);
@@ -1230,6 +1573,194 @@ app.get('/api/users/me', authenticateToken, async (req, res) => {
 });
 
 // ============= MISSING ENDPOINTS REQUIRED BY FRONTEND =============
+
+// Get staff users for administration (excludes APODERADO)
+// IMPORTANT: This must be registered BEFORE /api/users/:id to prevent route conflicts
+app.get('/api/users/staff', authenticateToken, async (req, res) => {
+  const client = await dbPool.connect();
+  try {
+    const { page = 0, size = 20, search, role, active } = req.query;
+    const offset = page * size;
+
+    let whereConditions = ["role != 'APODERADO'"]; // Exclude guardians
+    const params = [];
+    let paramIndex = 1;
+
+    if (search) {
+      whereConditions.push(`(first_name ILIKE $${paramIndex} OR last_name ILIKE $${paramIndex} OR email ILIKE $${paramIndex})`);
+      params.push(`%${search}%`);
+      paramIndex++;
+    }
+
+    if (role) {
+      whereConditions.push(`role = $${paramIndex}`);
+      params.push(role);
+      paramIndex++;
+    }
+
+    if (active !== undefined) {
+      whereConditions.push(`active = $${paramIndex}`);
+      params.push(active === 'true');
+      paramIndex++;
+    }
+
+    const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
+
+    // Get total count
+    const countQuery = `SELECT COUNT(*) as total FROM users ${whereClause}`;
+    const countResult = await client.query(countQuery, params);
+    const total = parseInt(countResult.rows[0].total);
+
+    // Get paginated data
+    const dataQuery = `
+      SELECT
+        id,
+        first_name as "firstName",
+        last_name as "lastName",
+        email,
+        role,
+        subject,
+        rut,
+        phone,
+        active,
+        email_verified as "emailVerified",
+        created_at as "createdAt",
+        last_login as "lastLogin"
+      FROM users
+      ${whereClause}
+      ORDER BY role, last_name, first_name
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+    `;
+
+    params.push(parseInt(size), offset);
+    const dataResult = await client.query(dataQuery, params);
+
+    const users = dataResult.rows.map(user => ({
+      id: user.id,
+      fullName: `${user.firstName} ${user.lastName}`,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      email: user.email,
+      role: user.role, // Return raw role for frontend validation
+      subject: user.subject,
+      rut: user.rut,
+      phone: user.phone,
+      active: user.active,
+      emailVerified: user.emailVerified,
+      createdAt: user.createdAt,
+      lastLogin: user.lastLogin
+    }));
+
+    res.json({
+      content: users,
+      totalElements: total,
+      totalPages: Math.ceil(total / size),
+      number: parseInt(page),
+      size: parseInt(size)
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching staff users:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al obtener personal del colegio',
+      details: error.message
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// Get guardian users for administration (only APODERADO)
+// IMPORTANT: This must be registered BEFORE /api/users/:id to prevent route conflicts
+app.get('/api/users/guardians', authenticateToken, async (req, res) => {
+  const client = await dbPool.connect();
+  try {
+    const { page = 0, size = 20, search, active } = req.query;
+    const offset = page * size;
+
+    let whereConditions = ["role = 'APODERADO'"]; // Only guardians
+    const params = [];
+    let paramIndex = 1;
+
+    if (search) {
+      whereConditions.push(`(first_name ILIKE $${paramIndex} OR last_name ILIKE $${paramIndex} OR email ILIKE $${paramIndex})`);
+      params.push(`%${search}%`);
+      paramIndex++;
+    }
+
+    if (active !== undefined) {
+      whereConditions.push(`active = $${paramIndex}`);
+      params.push(active === 'true');
+      paramIndex++;
+    }
+
+    const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
+
+    // Get total count
+    const countQuery = `SELECT COUNT(*) as total FROM users ${whereClause}`;
+    const countResult = await client.query(countQuery, params);
+    const total = parseInt(countResult.rows[0].total);
+
+    // Get paginated data
+    const dataQuery = `
+      SELECT
+        id,
+        first_name as "firstName",
+        last_name as "lastName",
+        email,
+        role,
+        subject,
+        rut,
+        phone,
+        active,
+        email_verified as "emailVerified",
+        created_at as "createdAt",
+        last_login as "lastLogin"
+      FROM users
+      ${whereClause}
+      ORDER BY last_name, first_name
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+    `;
+
+    params.push(parseInt(size), offset);
+    const dataResult = await client.query(dataQuery, params);
+
+    const users = dataResult.rows.map(user => ({
+      id: user.id,
+      fullName: `${user.firstName} ${user.lastName}`,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      email: user.email,
+      role: user.role,
+      subject: user.subject,
+      rut: user.rut,
+      phone: user.phone,
+      active: user.active,
+      emailVerified: user.emailVerified,
+      createdAt: user.createdAt,
+      lastLogin: user.lastLogin
+    }));
+
+    res.json({
+      content: users,
+      totalElements: total,
+      totalPages: Math.ceil(total / size),
+      number: parseInt(page),
+      size: parseInt(size)
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching guardian users:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al obtener apoderados',
+      details: error.message
+    });
+  } finally {
+    client.release();
+  }
+});
 
 // Get user by ID endpoint - required by userService.ts:57
 app.get('/api/users/:id', authenticateToken, (req, res) => {
