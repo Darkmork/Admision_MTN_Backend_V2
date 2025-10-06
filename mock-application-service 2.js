@@ -1,5 +1,4 @@
 const express = require('express');
-const compression = require('compression');
 const { Pool } = require('pg');
 const CircuitBreaker = require('opossum');
 const axios = require('axios');
@@ -7,9 +6,6 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const PDFDocument = require('pdfkit');
-const { translateToSpanish } = require('./translations');
-const { validateRUT } = require('./utils/validateRUT');
-const { logAudit, getClientIp, getUserAgent, AuditActions, EntityTypes } = require('./utils/auditLogger');
 const app = express();
 const port = 8083;
 
@@ -138,62 +134,6 @@ setupBreakerEvents(externalServiceBreaker, 'External');
 
 // Legacy breaker for backward compatibility (maps to medium query breaker)
 const queryWithCircuitBreaker = mediumQueryBreaker;
-
-// ============= RESPONSE UTILITY FUNCTIONS =============
-// Standard response format helpers to ensure API contract consistency
-
-const now = () => new Date().toISOString();
-
-/**
- * Success response for single entity
- * @param {Object} data - The data object to return
- * @param {Object} meta - Optional metadata (merged into response)
- * @returns {Object} Standardized success response
- */
-const ok = (data, meta = {}) => ({
-  success: true,
-  data,
-  timestamp: now(),
-  ...meta
-});
-
-/**
- * Success response for paginated lists
- * @param {Array} items - Array of items to return
- * @param {Object} pagination - Pagination info: { total, page, limit }
- * @returns {Object} Standardized paginated response
- */
-const page = (items, { total, page = 0, limit = items?.length ?? 10 } = {}) => {
-  const totalPages = limit > 0 ? Math.ceil(total / limit) : 1;
-  const hasNext = page < totalPages - 1;
-  const hasPrev = page > 0;
-
-  return {
-    success: true,
-    data: items,
-    total,
-    page,
-    limit,
-    totalPages,
-    hasNext,
-    hasPrev,
-    timestamp: now()
-  };
-};
-
-/**
- * Error response
- * @param {string} error - Human-readable error message
- * @param {Object} options - Error details: { errorCode, details, status }
- * @returns {Object} Standardized error response
- */
-const fail = (error, { errorCode = 'GEN_000', details = {}, status = 400 } = {}) => ({
-  success: false,
-  error,
-  errorCode,
-  details,
-  timestamp: now()
-});
 
 // ============= FILE UPLOAD CONFIGURATION =============
 
@@ -487,18 +427,6 @@ const handleDatabaseError = (error, correlationId) => {
 
 app.use(express.json({ limit: '10mb' }));
 
-// Response compression middleware
-app.use(compression({
-  filter: (req, res) => {
-    if (req.headers['x-no-compression']) {
-      return false;
-    }
-    return compression.filter(req, res);
-  },
-  threshold: 1024,
-  level: 6
-}));
-
 // Input validation helpers
 const validateRUT = (rut) => {
   if (!rut || typeof rut !== 'string') return false;
@@ -709,16 +637,6 @@ app.get('/health', (req, res) => {
 app.get('/api/applications', async (req, res) => {
   const client = await dbPool.connect();
   try {
-    // Extract pagination parameters
-    const pageNum = parseInt(req.query.page) || 0;
-    const limit = parseInt(req.query.limit) || 20;
-    const offset = pageNum * limit;
-
-    // Query to count total applications (exclude soft-deleted)
-    const countQuery = `SELECT COUNT(*) as total FROM applications WHERE deleted_at IS NULL`;
-    const countResult = await queryWithCircuitBreaker.fire(client, countQuery, []);
-    const total = parseInt(countResult.rows[0].total);
-
     // Query to get applications with student, parent and evaluation details
     const query = `
       SELECT
@@ -766,12 +684,10 @@ app.get('/api/applications', async (req, res) => {
       LEFT JOIN students s ON s.id = a.student_id
       LEFT JOIN parents f ON f.id = a.father_id AND f.parent_type = 'FATHER'
       LEFT JOIN parents m ON m.id = a.mother_id AND m.parent_type = 'MOTHER'
-      WHERE a.deleted_at IS NULL
       ORDER BY a.created_at DESC
-      LIMIT $1 OFFSET $2
     `;
 
-    const result = await queryWithCircuitBreaker.fire(client, query, [limit, offset]);
+    const result = await queryWithCircuitBreaker.fire(client, query, []);
     
     // Transform the data to the expected format
     const applications = result.rows.map(row => ({
@@ -821,22 +737,17 @@ app.get('/api/applications', async (req, res) => {
         profession: row.mother_profession
       } : null
     }));
-
-    // Traducir estados de applications al español
-    const translatedApplications = applications.map(app => ({
-      ...app,
-      status: translateToSpanish(app.status, 'application_status')
-    }));
-
-    // Return standardized paginated response
-    res.json(page(translatedApplications, { total, page: pageNum, limit }));
+    
+    res.json(applications);
 
   } catch (error) {
     const errorInfo = handleDatabaseError(error, req.correlationId);
-    res.status(errorInfo.status).json(fail(errorInfo.message, {
-      errorCode: 'APP_LIST_001',
-      details: { correlationId: req.correlationId }
-    }));
+    res.status(errorInfo.status).json({
+      success: false,
+      error: errorInfo.message,
+      correlationId: req.correlationId,
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   } finally {
     client.release();
   }
@@ -891,7 +802,7 @@ app.get('/api/applications/search', async (req, res) => {
       sortOrder = 'DESC',    // ASC or DESC
 
       // Pagination
-      page: pageNum = 0,  // 0-based pagination (0 = first page)
+      page = 0,  // 0-based pagination (0 = first page)
       limit = 20
     } = req.query;
 
@@ -1005,7 +916,7 @@ app.get('/api/applications/search', async (req, res) => {
     const sortDirection = sortOrder.toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
     // Calculate pagination (0-based: page 0 = first page)
-    // pageNum already declared from destructuring above
+    const pageNum = parseInt(page);
     const limitNum = parseInt(limit);
     const offset = pageNum * limitNum;  // page 0 → offset 0, page 1 → offset 20, etc.
 
@@ -1146,27 +1057,50 @@ app.get('/api/applications/search', async (req, res) => {
       nextInterviewDate: row.next_interview_date
     }));
 
-    // Build response with standardized pagination
-    res.json(page(applications, {
-      total: totalResults,
-      page: pageNum,
-      limit: limitNum
-    }));
+    // Build response with pagination metadata (0-based)
+    res.json({
+      success: true,
+      data: applications,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total: totalResults,
+        totalPages: Math.ceil(totalResults / limitNum),
+        hasNext: ((pageNum + 1) * limitNum) < totalResults,
+        hasPrev: pageNum > 0
+      },
+      filters: {
+        search,
+        status,
+        gradeApplied,
+        academicYear,
+        documentsComplete,
+        hasSpecialNeeds,
+        sortBy: sortField,
+        sortOrder: sortDirection
+      },
+      timestamp: new Date().toISOString()
+    });
 
   } catch (error) {
     console.error('❌ Error in enhanced application search:', error);
 
     if (error.message && error.message.includes('breaker')) {
-      return res.status(503).json(fail('Service temporarily unavailable - circuit breaker open', {
-        errorCode: 'CIRCUIT_BREAKER_OPEN',
-        details: { retryAfter: 30 }
-      }));
+      return res.status(503).json({
+        success: false,
+        error: 'Service temporarily unavailable - circuit breaker open',
+        code: 'CIRCUIT_BREAKER_OPEN',
+        message: 'El servicio está temporalmente sobrecargado. Por favor, intenta nuevamente en unos minutos.',
+        retryAfter: 30
+      });
     }
 
-    res.status(500).json(fail('Error en búsqueda avanzada de postulaciones', {
-      errorCode: 'APP_SEARCH_001',
-      details: { correlationId: req.correlationId, message: error.message }
-    }));
+    res.status(500).json({
+      success: false,
+      error: 'Error en búsqueda avanzada de postulaciones',
+      message: error.message,
+      correlationId: req.correlationId
+    });
   } finally {
     client.release();
   }
@@ -1357,51 +1291,6 @@ app.get('/api/applications/public/all', async (req, res) => {
       success: true,
       data: mockApplications,
       total: mockApplications.length
-    });
-  } finally {
-    client.release();
-  }
-});
-
-// Get application statistics - QA Test requirement
-app.get('/api/applications/stats', authenticateToken, async (req, res) => {
-  const client = await dbPool.connect();
-  try {
-    // Get counts by status
-    const statusQuery = await client.query(`
-      SELECT status, COUNT(*) as count
-      FROM applications
-      GROUP BY status
-    `);
-
-    // Get total count
-    const totalQuery = await client.query('SELECT COUNT(*) as total FROM applications');
-    const total = parseInt(totalQuery.rows[0].total);
-
-    // Build flat stats object
-    const stats = {
-      total: total,
-      pending: 0,
-      under_review: 0,
-      exam_scheduled: 0,
-      approved: 0,
-      rejected: 0,
-      waitlisted: 0
-    };
-
-    // Populate stats from query
-    statusQuery.rows.forEach(row => {
-      const status = row.status.toLowerCase();
-      stats[status] = parseInt(row.count);
-    });
-
-    console.log('📊 Application stats:', stats);
-    res.json(stats);
-  } catch (error) {
-    console.error('❌ Error getting application stats:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Error al obtener estadísticas de postulaciones'
     });
   } finally {
     client.release();
@@ -1615,18 +1504,12 @@ app.get('/api/applications/:id', async (req, res) => {
         m.email as mother_email,
         m.phone as mother_phone,
         m.profession as mother_profession,
-        m.address as mother_address,
-
-        -- Applicant user information (guardian who created the application)
-        au.email as applicant_email,
-        au.first_name as applicant_first_name,
-        au.last_name as applicant_last_name
+        m.address as mother_address
 
       FROM applications a
       LEFT JOIN students s ON s.id = a.student_id
       LEFT JOIN parents f ON f.id = a.father_id AND f.parent_type = 'FATHER'
       LEFT JOIN parents m ON m.id = a.mother_id AND m.parent_type = 'MOTHER'
-      LEFT JOIN users au ON au.id = a.applicant_user_id
       WHERE a.id = $1
     `;
 
@@ -1747,14 +1630,7 @@ app.get('/api/applications/:id', async (req, res) => {
         profession: row.mother_profession,
         address: row.mother_address
       } : null,
-
-      // Applicant user (guardian who created the application)
-      applicantUser: row.applicant_email ? {
-        email: row.applicant_email,
-        firstName: row.applicant_first_name,
-        lastName: row.applicant_last_name
-      } : null,
-
+      
       // Interviews
       interviews: interviewsResult.rows.map(interview => ({
         id: interview.id,
@@ -1803,16 +1679,20 @@ app.get('/api/applications/:id', async (req, res) => {
         totalSteps: 5
       }
     };
-
-    // Return unwrapped application object (no success/data/timestamp wrapper)
-    res.json(application);
+    
+    res.json({
+      success: true,
+      data: application
+    });
 
   } catch (error) {
     const errorInfo = handleDatabaseError(error, req.correlationId);
-    res.status(errorInfo.status).json(fail(errorInfo.message, {
-      errorCode: 'APP_GET_001',
-      details: { correlationId: req.correlationId }
-    }));
+    res.status(errorInfo.status).json({
+      success: false,
+      error: errorInfo.message,
+      correlationId: req.correlationId,
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   } finally {
     client.release();
   }
@@ -1831,15 +1711,6 @@ app.post('/api/applications', authenticateToken, validateApplicationInput, async
     await client.query('BEGIN');
 
     try {
-      // Validate student RUT
-      if (body.rut && !validateRUT(body.rut)) {
-        await client.query('ROLLBACK');
-        return res.status(400).json(fail(
-          'RUT del estudiante inválido. Verifique el formato y dígito verificador.',
-          { errorCode: 'APP_002', details: { field: 'rut', value: body.rut } }
-        ));
-      }
-
       // Insert student using flat structure from frontend
       const studentQuery = `
         INSERT INTO students (
@@ -1862,7 +1733,7 @@ app.post('/api/applications', authenticateToken, validateApplicationInput, async
         body.studentEmail || null,
         body.schoolApplied || 'MONTE_TABOR' // default school
       ]);
-
+      
       const studentId = studentResult.rows[0].id;
       
       let fatherId = null;
@@ -1986,24 +1857,7 @@ app.post('/api/applications', authenticateToken, validateApplicationInput, async
 
       // Commit transaction
       await client.query('COMMIT');
-
-      // Audit log: Application created
-      await logAudit(dbPool, {
-        userId: applicantUserId || null,
-        action: AuditActions.CREATE,
-        entityType: EntityTypes.APPLICATION,
-        entityId: application.id,
-        oldValues: null,
-        newValues: {
-          status: 'PENDING',
-          studentId: studentId,
-          applicationYear: applicationYear,
-          submissionDate: application.submission_date
-        },
-        ipAddress: getClientIp(req),
-        userAgent: getUserAgent(req)
-      });
-
+      
       // Send notification for new application
       const primaryEmail = body.parent1Email || body.parent2Email || body.studentEmail;
       if (primaryEmail) {
@@ -2090,8 +1944,8 @@ app.post('/api/applications', authenticateToken, validateApplicationInput, async
   }
 });
 
-// Update application with real database integration (no validation middleware - uses nested structure)
-app.put('/api/applications/:id', authenticateToken, async (req, res) => {
+// Update application with real database integration
+app.put('/api/applications/:id', authenticateToken, validateApplicationInput, async (req, res) => {
   const applicationId = parseInt(req.params.id);
 
   if (!applicationId || isNaN(applicationId)) {
@@ -2192,17 +2046,18 @@ app.put('/api/applications/:id', authenticateToken, async (req, res) => {
       // Update father if provided
       if (father && existingApp.father_id) {
         const fatherUpdateQuery = `
-          UPDATE parents SET
+          UPDATE parents SET 
             full_name = COALESCE($1, full_name),
             rut = COALESCE($2, rut),
             email = COALESCE($3, email),
             phone = COALESCE($4, phone),
             profession = COALESCE($5, profession),
             address = COALESCE($6, address),
+            workplace = COALESCE($7, workplace),
             updated_at = NOW()
-          WHERE id = $7
+          WHERE id = $8
         `;
-
+        
         await client.query(fatherUpdateQuery, [
           father.fullName,
           father.rut,
@@ -2210,6 +2065,7 @@ app.put('/api/applications/:id', authenticateToken, async (req, res) => {
           father.phone,
           father.profession || father.occupation,
           father.address,
+          father.workplace || father.workPlace,
           existingApp.father_id
         ]);
       }
@@ -2217,17 +2073,18 @@ app.put('/api/applications/:id', authenticateToken, async (req, res) => {
       // Update mother if provided
       if (mother && existingApp.mother_id) {
         const motherUpdateQuery = `
-          UPDATE parents SET
+          UPDATE parents SET 
             full_name = COALESCE($1, full_name),
             rut = COALESCE($2, rut),
             email = COALESCE($3, email),
             phone = COALESCE($4, phone),
             profession = COALESCE($5, profession),
             address = COALESCE($6, address),
+            workplace = COALESCE($7, workplace),
             updated_at = NOW()
-          WHERE id = $7
+          WHERE id = $8
         `;
-
+        
         await client.query(motherUpdateQuery, [
           mother.fullName,
           mother.rut,
@@ -2235,6 +2092,7 @@ app.put('/api/applications/:id', authenticateToken, async (req, res) => {
           mother.phone,
           mother.profession || mother.occupation,
           mother.address,
+          mother.workplace || mother.workPlace,
           existingApp.mother_id
         ]);
       }
@@ -2357,110 +2215,6 @@ app.put('/api/applications/:id', authenticateToken, async (req, res) => {
 
 // ============= MISSING ENDPOINTS REQUIRED BY FRONTEND =============
 
-// Final admission decision endpoint - Approve or Reject application with email notification
-app.post('/api/applications/:id/final-decision', authenticateToken, async (req, res) => {
-  const client = await dbPool.connect();
-  try {
-    const applicationId = parseInt(req.params.id);
-    const { decision, note } = req.body; // decision: 'APPROVED' or 'REJECTED', note: optional message
-
-    // Validar decisión
-    if (!decision || !['APPROVED', 'REJECTED'].includes(decision)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Decisión inválida. Debe ser APPROVED o REJECTED'
-      });
-    }
-
-    // Obtener información completa de la aplicación
-    const appResult = await client.query(`
-      SELECT
-        a.id,
-        a.status as current_status,
-        s.first_name,
-        s.paternal_last_name,
-        s.maternal_last_name,
-        s.grade_applied,
-        u.email as guardian_email,
-        u.first_name as guardian_name
-      FROM applications a
-      JOIN students s ON s.id = a.student_id
-      LEFT JOIN users u ON a.applicant_user_id = u.id
-      WHERE a.id = $1
-    `, [applicationId]);
-
-    if (appResult.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Aplicación no encontrada'
-      });
-    }
-
-    const application = appResult.rows[0];
-    const oldStatus = application.status;
-
-    // Actualizar estado de la aplicación
-    const newStatus = decision === 'APPROVED' ? 'APPROVED' : 'REJECTED';
-    await client.query(
-      'UPDATE applications SET status = $1, updated_at = NOW() WHERE id = $2',
-      [newStatus, applicationId]
-    );
-
-    // Audit log: Status change
-    await logAudit(dbPool, {
-      userId: req.user ? parseInt(req.user.userId) : null,
-      action: AuditActions.STATUS_CHANGE,
-      entityType: EntityTypes.APPLICATION,
-      entityId: applicationId,
-      oldValues: { status: oldStatus },
-      newValues: { status: newStatus, decision: decision, note: note },
-      ipAddress: getClientIp(req),
-      userAgent: getUserAgent(req)
-    });
-
-    // Enviar notificación por email
-    const templateType = decision === 'APPROVED' ? 'ACCEPTANCE' : 'REJECTION';
-    const emailData = {
-      studentName: application.student_name,
-      guardianName: application.guardian_name,
-      gradeApplied: application.grade_applied,
-      admissionNote: decision === 'APPROVED' ? note : undefined,
-      rejectionReason: decision === 'REJECTED' ? note : undefined
-    };
-
-    try {
-      await axios.post('http://localhost:8085/api/notifications/send', {
-        to: application.guardian_email,
-        templateType: templateType,
-        data: emailData
-      });
-      console.log(`📧 Email de ${decision === 'APPROVED' ? 'aceptación' : 'rechazo'} enviado a:`, application.guardian_email);
-    } catch (emailError) {
-      console.error('❌ Error enviando email:', emailError.message);
-      // No fallar la operación si el email falla
-    }
-
-    res.json({
-      success: true,
-      message: `Aplicación ${decision === 'APPROVED' ? 'aprobada' : 'rechazada'} exitosamente`,
-      data: {
-        id: applicationId,
-        status: translateToSpanish(newStatus, 'application_status'),
-        emailSent: true
-      }
-    });
-
-  } catch (error) {
-    console.error('❌ Error en decisión final:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al procesar la decisión final'
-    });
-  } finally {
-    client.release();
-  }
-});
-
 // Archive application endpoint - required by applicationService.ts:347
 app.put('/api/applications/:id/archive', authenticateToken, async (req, res) => {
   const client = await dbPool.connect();
@@ -2558,7 +2312,7 @@ app.patch('/api/applications/:id/status', authenticateToken, async (req, res) =>
     // Get current application with student info
     const currentAppQuery = `
       SELECT a.*,
-             s.first_name, s.paternal_last_name, s.maternal_last_name, s.email as student_email,
+             s.first_name, s.last_name, s.email as student_email,
              u.email as guardian_email, u.first_name as guardian_first_name
       FROM applications a
       LEFT JOIN students s ON a.student_id = s.id
@@ -2616,7 +2370,7 @@ app.patch('/api/applications/:id/status', authenticateToken, async (req, res) =>
 
     // Send notification to guardian about status change
     const guardianEmail = currentApp.rows[0].guardian_email;
-    const studentName = `${currentApp.rows[0].first_name} ${currentApp.rows[0].paternal_last_name} ${currentApp.rows[0].maternal_last_name || ''}`.trim();
+    const studentName = `${currentApp.rows[0].first_name} ${currentApp.rows[0].last_name}`;
 
     if (guardianEmail) {
       try {

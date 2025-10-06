@@ -1,8 +1,6 @@
 const express = require('express');
-const compression = require('compression');
 const { Pool } = require('pg');
 const CircuitBreaker = require('opossum');
-const { translateToSpanish } = require('./translations');
 const app = express();
 const port = 8086;
 
@@ -207,14 +205,6 @@ setInterval(() => {
 
 // Middleware
 app.use(express.json());
-app.use(compression({
-  filter: (req, res) => {
-    if (req.headers['x-no-compression']) return false;
-    return compression.filter(req, res);
-  },
-  threshold: 1024,
-  level: 6
-}));
 // CORS is handled by NGINX gateway - commented to avoid duplicate headers
 // app.use((req, res, next) => {
 //   res.header('Access-Control-Allow-Origin', '*');
@@ -535,9 +525,9 @@ app.get('/api/dashboard/upcoming-interviews', async (req, res) => {
       evaluatorName: interview.evaluator_name,
       scheduledDate: interview.scheduled_date.toISOString().split('T')[0],
       scheduledTime: interview.scheduled_date.toISOString().split('T')[1].substring(0, 5),
-      type: translateToSpanish(interview.type, 'interview_type'),
+      type: interview.type,
       mode: interview.mode,
-      status: translateToSpanish(interview.status, 'interview_status')
+      status: interview.status
     }));
 
     res.json({
@@ -838,9 +828,8 @@ app.get('/api/analytics/status-distribution', async (req, res) => {
     const statusPercentages = {};
 
     stats.rows.forEach(row => {
-      const translatedStatus = translateToSpanish(row.status, 'application_status');
-      statusCount[translatedStatus] = parseInt(row.count);
-      statusPercentages[translatedStatus] = totalApplications > 0
+      statusCount[row.status] = parseInt(row.count);
+      statusPercentages[row.status] = totalApplications > 0
         ? Math.round((parseInt(row.count) / totalApplications) * 100 * 100) / 100
         : 0;
     });
