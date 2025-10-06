@@ -1,9 +1,6 @@
 const express = require('express');
-const compression = require('compression');
 const { Pool } = require('pg');
 const CircuitBreaker = require('opossum');
-const axios = require('axios');
-const { translateToSpanish, translateArrayToSpanish } = require('./translations');
 const app = express();
 const port = 8084;
 
@@ -87,10 +84,6 @@ const setupBreakerEvents = (breaker, name) => {
     console.log(`✅ [Circuit Breaker ${name}] CLOSED - Evaluation service recovered`);
   });
 
-  breaker.on('failure', (error) => {
-    console.error(`💥 [Circuit Breaker ${name}] FAILURE - Actual error:`, error.message);
-  });
-
   breaker.fallback(() => {
     throw new Error(`Service temporarily unavailable - ${name} circuit breaker open`);
   });
@@ -167,61 +160,6 @@ class SimpleCache {
 // Initialize cache
 const evaluationCache = new SimpleCache();
 
-// ============================================================================
-// TRANSLATION HELPERS
-// ============================================================================
-
-/**
- * Traduce un objeto de entrevista al español
- * @param {Object} interview - Objeto de entrevista
- * @returns {Object} Entrevista con campos traducidos
- */
-function translateInterview(interview) {
-  if (!interview) return interview;
-
-  return {
-    ...interview,
-    status: translateToSpanish(interview.status, 'interview_status')
-    // DO NOT translate type - frontend expects English enum values
-    // type: translateToSpanish(interview.type, 'interview_type')
-  };
-}
-
-/**
- * Traduce un array de entrevistas al español
- * @param {Array} interviews - Array de entrevistas
- * @returns {Array} Entrevistas traducidas
- */
-function translateInterviews(interviews) {
-  if (!Array.isArray(interviews)) return interviews;
-  return interviews.map(translateInterview);
-}
-
-/**
- * Traduce un objeto de evaluación al español
- * @param {Object} evaluation - Objeto de evaluación
- * @returns {Object} Evaluación con campos traducidos
- */
-function translateEvaluation(evaluation) {
-  if (!evaluation) return evaluation;
-
-  return {
-    ...evaluation,
-    status: translateToSpanish(evaluation.status, 'evaluation_status'),
-    type: translateToSpanish(evaluation.type, 'evaluation_type')
-  };
-}
-
-/**
- * Traduce un array de evaluaciones al español
- * @param {Array} evaluations - Array de evaluaciones
- * @returns {Array} Evaluaciones traducidas
- */
-function translateEvaluations(evaluations) {
-  if (!Array.isArray(evaluations)) return evaluations;
-  return evaluations.map(translateEvaluation);
-}
-
 // Periodic cleanup of expired entries (every 5 minutes)
 setInterval(() => {
   const now = Date.now();
@@ -238,58 +176,13 @@ setInterval(() => {
 }, 300000);
 
 app.use(express.json());
-app.use(compression({
-  filter: (req, res) => {
-    if (req.headers['x-no-compression']) return false;
-    return compression.filter(req, res);
-  },
-  threshold: 1024,
-  level: 6
-}));
-
-// Helper functions to map evaluation types to subjects
-function getSubjectFromEvaluationType(evaluationType) {
-  const typeMap = {
-    'LANGUAGE_EXAM': 'SPANISH',
-    'MATHEMATICS_EXAM': 'MATHEMATICS',
-    'ENGLISH_EXAM': 'ENGLISH',
-    'SCIENCE_EXAM': 'SCIENCE',
-    'HISTORY_EXAM': 'HISTORY',
-    'PSYCHOLOGICAL_INTERVIEW': 'PSYCHOLOGY'
-  };
-  return typeMap[evaluationType] || 'GENERAL';
-}
-
-function getSubjectDisplayName(evaluationType, professorSubject) {
-  if (professorSubject) {
-    const subjectNames = {
-      'MATHEMATICS': 'Matemáticas',
-      'SPANISH': 'Lenguaje y Comunicación',
-      'ENGLISH': 'Inglés',
-      'SCIENCE': 'Ciencias Naturales',
-      'HISTORY': 'Historia y Geografía',
-      'PSYCHOLOGY': 'Evaluación Psicológica'
-    };
-    return subjectNames[professorSubject] || professorSubject;
-  }
-
-  const typeNames = {
-    'LANGUAGE_EXAM': 'Lenguaje y Comunicación',
-    'MATHEMATICS_EXAM': 'Matemáticas',
-    'ENGLISH_EXAM': 'Inglés',
-    'SCIENCE_EXAM': 'Ciencias Naturales',
-    'HISTORY_EXAM': 'Historia y Geografía',
-    'PSYCHOLOGICAL_INTERVIEW': 'Evaluación Psicológica'
-  };
-  return typeNames[evaluationType] || 'Evaluación General';
-}
 
 // CORS middleware - commented out because NGINX handles it
 // app.use((req, res, next) => {
 //   res.header('Access-Control-Allow-Origin', '*');
 //   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
 //   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-//
+//   
 //   if (req.method === 'OPTIONS') {
 //     res.sendStatus(200);
 //   } else {
@@ -919,258 +812,180 @@ app.get('/api/interviews/students', async (req, res) => {
 });
 
 // Endpoint para obtener slots disponibles para agendamiento
-app.get('/api/interviews/available-slots', async (req, res) => {
+app.get('/api/interviews/available-slots', (req, res) => {
   const { interviewerId, date, duration } = req.query;
-
+  
   console.log(`🕒 Solicitud de horarios disponibles para entrevistador ${interviewerId} en fecha ${date} con duración ${duration} minutos`);
-
-  const client = await dbPool.connect();
-  try {
-    // Verificar que el entrevistador existe en la base de datos
-    const interviewerQuery = await client.query(
-      'SELECT id, role FROM users WHERE id = $1 AND role IN (\'TEACHER\', \'PSYCHOLOGIST\', \'COORDINATOR\', \'CYCLE_DIRECTOR\')',
-      [parseInt(interviewerId)]
-    );
-
-    console.log(`🔍 Entrevistador ${interviewerId} encontrado:`, interviewerQuery.rows.length > 0 ? interviewerQuery.rows[0] : 'NO');
-
-    if (interviewerQuery.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: 'Entrevistador no encontrado'
-      });
-    }
-
-    // Parse date correctly to avoid UTC timezone issues
-    const [year, month, day] = date.split('-').map(Number);
-    const requestDate = new Date(year, month - 1, day); // month is 0-indexed
-    const dayOfWeek = requestDate.getDay(); // 0 = Domingo, 1 = Lunes, etc.
-    const dayNames = ['SUNDAY', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY'];
-    const dayName = dayNames[dayOfWeek];
-
-    console.log(`📅 Fecha solicitada: ${date}, dayOfWeek JS: ${dayOfWeek}, dayName: ${dayName}`);
-
-    // Obtener horarios configurados para el entrevistador en ese día
-    const schedulesQuery = await client.query(
-      `SELECT start_time, end_time
-       FROM interviewer_schedules
-       WHERE interviewer_id = $1
-         AND day_of_week = $2
-         AND is_active = true
-         AND schedule_type = 'RECURRING'
-       ORDER BY start_time`,
-      [parseInt(interviewerId), dayName]
-    );
-
-    console.log(`📋 Horarios encontrados para interviewer_id=${interviewerId}, day=${dayName}: ${schedulesQuery.rows.length}`);
-
-    if (schedulesQuery.rows.length === 0) {
-      // No hay horarios configurados para este día
-      return res.json({
-        success: true,
-        data: {
-          date: date,
-          interviewerId: parseInt(interviewerId),
-          duration: parseInt(duration) || 60,
-          availableSlots: []
-        }
-      });
-    }
-
-    // Obtener entrevistas ya agendadas para este entrevistador en esta fecha
-    const occupiedQuery = await client.query(
-      `SELECT DATE(scheduled_date) as date,
-              TO_CHAR(scheduled_date, 'HH24:MI') as time,
-              duration_minutes
-       FROM interviews
-       WHERE interviewer_id = $1
-         AND DATE(scheduled_date) = $2
-         AND status IN ('SCHEDULED', 'CONFIRMED', 'IN_PROGRESS')`,
-      [parseInt(interviewerId), date]
-    );
-
-    const occupiedSlots = new Set(occupiedQuery.rows.map(row => row.time));
-    console.log(`📅 Slots ocupados para ${date}:`, Array.from(occupiedSlots));
-
-    // Generar slots disponibles basados en horarios reales
-    const availableSlots = [];
-    const slotDuration = parseInt(duration) || 30; // Default 30 minutos
-
-    console.log(`📋 Horarios encontrados en BD: ${schedulesQuery.rows.length}`);
-
-    for (const schedule of schedulesQuery.rows) {
-      const startTime = schedule.start_time; // formato "HH:MM:SS"
-      const slotTime = startTime.substring(0, 5); // "HH:MM"
-
-      console.log(`🔍 Revisando slot ${slotTime} - ocupado: ${occupiedSlots.has(slotTime)}`);
-
-      // Verificar si el slot está ocupado
-      if (!occupiedSlots.has(slotTime)) {
+  
+  // Verificar que el entrevistador existe
+  const interviewer = interviewers.find(i => i.id === parseInt(interviewerId));
+  if (!interviewer) {
+    return res.status(404).json({
+      success: false,
+      error: 'Entrevistador no encontrado'
+    });
+  }
+  
+  // Simular slots disponibles basados en un horario típico de trabajo
+  const availableSlots = [];
+  const requestDate = new Date(date);
+  const dayOfWeek = requestDate.getDay(); // 0 = Domingo, 1 = Lunes, etc.
+  
+  // Solo generar slots para días laborables (Lunes a Viernes)
+  if (dayOfWeek >= 1 && dayOfWeek <= 5) {
+    // Horarios típicos: 9:00-12:00 y 14:00-17:00
+    const morningSlots = [
+      '09:00', '09:30', '10:00', '10:30', '11:00', '11:30'
+    ];
+    const afternoonSlots = [
+      '14:00', '14:30', '15:00', '15:30', '16:00', '16:30'
+    ];
+    
+    // Combinar ambos turnos
+    const allSlots = [...morningSlots, ...afternoonSlots];
+    
+    // Simular algunos slots ocupados (para hacer más realista)
+    const occupiedSlots = ['10:00', '15:00', '16:30']; // Algunos horarios ya ocupados
+    
+    // Filtrar slots disponibles
+    allSlots.forEach(slot => {
+      if (!occupiedSlots.includes(slot)) {
         availableSlots.push({
-          time: slotTime,
+          time: slot,
           available: true,
-          duration: slotDuration
+          duration: parseInt(duration) || 60
         });
       }
-    }
-
-    console.log(`✅ Slots disponibles encontrados: ${availableSlots.length}`);
-
-    res.json({
-      success: true,
-      data: {
-        date: date,
-        interviewerId: parseInt(interviewerId),
-        duration: parseInt(duration) || 60,
-        availableSlots: availableSlots
-      }
     });
-  } catch (error) {
-    console.error('Error obteniendo slots disponibles:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Error interno del servidor',
-      message: error.message
-    });
-  } finally {
-    client.release();
   }
+  
+  res.json({
+    success: true,
+    data: {
+      date: date,
+      interviewerId: parseInt(interviewerId),
+      duration: parseInt(duration) || 60,
+      availableSlots: availableSlots
+    }
+  });
 });
 
 // Endpoint para obtener disponibilidad de entrevistadores en un rango de fechas
-app.get('/api/interviews/interviewer-availability', async (req, res) => {
+app.get('/api/interviews/interviewer-availability', (req, res) => {
   const { interviewerId, startDate, endDate } = req.query;
-
+  
   console.log(`📅 Solicitud de disponibilidad para entrevistador ${interviewerId} desde ${startDate} hasta ${endDate}`);
-
-  const client = await dbPool.connect();
-  try {
-    // Verificar que el entrevistador existe en la base de datos
-    const interviewerQuery = await client.query(
-      'SELECT id, CONCAT(first_name, \' \', last_name) as name, role, subject FROM users WHERE id = $1 AND role IN (\'TEACHER\', \'PSYCHOLOGIST\', \'COORDINATOR\', \'CYCLE_DIRECTOR\')',
-      [parseInt(interviewerId)]
-    );
-
-    if (interviewerQuery.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: 'Entrevistador no encontrado'
-      });
-    }
-
-    const interviewer = interviewerQuery.rows[0];
-
-    // Validar fechas
-    if (!startDate || !endDate) {
-      return res.status(400).json({
-        success: false,
-        error: 'Se requieren las fechas de inicio y fin'
-      });
-    }
-
-    const start = new Date(startDate);
-    const end = new Date(endDate);
-
-    if (start > end) {
-      return res.status(400).json({
-        success: false,
-        error: 'La fecha de inicio debe ser anterior a la fecha de fin'
-      });
-    }
-
-    // Generar disponibilidad para cada día en el rango
-    const availability = [];
-    const currentDate = new Date(start);
-
-    while (currentDate <= end) {
-      const dayOfWeek = currentDate.getDay(); // 0 = Domingo, 1 = Lunes, etc.
-      const dateString = currentDate.toISOString().split('T')[0];
-
-      // Solo días laborables (Lunes a Viernes)
-      if (dayOfWeek >= 1 && dayOfWeek <= 5) {
-        // Horarios típicos del entrevistador
-        const morningSlots = [
-          { time: '09:00:00', duration: 60, available: true },
-          { time: '10:00:00', duration: 60, available: Math.random() > 0.3 }, // 70% disponible
-          { time: '11:00:00', duration: 60, available: Math.random() > 0.4 }  // 60% disponible
-        ];
-
-        const afternoonSlots = [
-          { time: '14:00:00', duration: 60, available: Math.random() > 0.2 }, // 80% disponible
-          { time: '15:00:00', duration: 60, available: Math.random() > 0.3 }, // 70% disponible
-          { time: '16:00:00', duration: 60, available: Math.random() > 0.5 }  // 50% disponible
-        ];
-
-        const daySlots = [...morningSlots, ...afternoonSlots].filter(slot => slot.available);
-
-        availability.push({
-          date: dateString,
-          dayOfWeek: ['DOMINGO', 'LUNES', 'MARTES', 'MIÉRCOLES', 'JUEVES', 'VIERNES', 'SÁBADO'][dayOfWeek],
-          isWorkingDay: true,
-          totalSlots: morningSlots.length + afternoonSlots.length,
-          availableSlots: daySlots.length,
-          slots: daySlots.map(slot => ({
-            startTime: slot.time,
-            duration: slot.duration,
-            available: slot.available
-          }))
-        });
-      } else {
-        // Fin de semana - no disponible
-        availability.push({
-          date: dateString,
-          dayOfWeek: ['DOMINGO', 'LUNES', 'MARTES', 'MIÉRCOLES', 'JUEVES', 'VIERNES', 'SÁBADO'][dayOfWeek],
-          isWorkingDay: false,
-          totalSlots: 0,
-          availableSlots: 0,
-          slots: []
-        });
-      }
-
-      // Avanzar al siguiente día
-      currentDate.setDate(currentDate.getDate() + 1);
-    }
-
-    // Calcular estadísticas generales
-    const totalWorkingDays = availability.filter(day => day.isWorkingDay).length;
-    const totalAvailableSlots = availability.reduce((sum, day) => sum + day.availableSlots, 0);
-    const totalSlots = availability.reduce((sum, day) => sum + day.totalSlots, 0);
-
-    res.json({
-      success: true,
-      data: {
-        interviewerId: parseInt(interviewerId),
-        interviewer: {
-          id: parseInt(interviewer.id),
-          name: interviewer.name,
-          role: interviewer.role,
-          subject: interviewer.subject || 'N/A'
-        },
-        period: {
-          startDate,
-          endDate,
-          totalDays: availability.length,
-          workingDays: totalWorkingDays
-        },
-        summary: {
-          totalSlots,
-          availableSlots: totalAvailableSlots,
-          occupiedSlots: totalSlots - totalAvailableSlots,
-          availabilityRate: totalSlots > 0 ? ((totalAvailableSlots / totalSlots) * 100).toFixed(1) : 0
-        },
-        dailyAvailability: availability
-      }
-    });
-  } catch (error) {
-    console.error('Error obteniendo disponibilidad del entrevistador:', error);
-    res.status(500).json({
+  
+  // Verificar que el entrevistador existe
+  const interviewer = interviewers.find(i => i.id === parseInt(interviewerId));
+  if (!interviewer) {
+    return res.status(404).json({
       success: false,
-      error: 'Error interno del servidor',
-      message: error.message
+      error: 'Entrevistador no encontrado'
     });
-  } finally {
-    client.release();
   }
+  
+  // Validar fechas
+  if (!startDate || !endDate) {
+    return res.status(400).json({
+      success: false,
+      error: 'Se requieren las fechas de inicio y fin'
+    });
+  }
+  
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+  
+  if (start > end) {
+    return res.status(400).json({
+      success: false,
+      error: 'La fecha de inicio debe ser anterior a la fecha de fin'
+    });
+  }
+  
+  // Generar disponibilidad para cada día en el rango
+  const availability = [];
+  const currentDate = new Date(start);
+  
+  while (currentDate <= end) {
+    const dayOfWeek = currentDate.getDay(); // 0 = Domingo, 1 = Lunes, etc.
+    const dateString = currentDate.toISOString().split('T')[0];
+    
+    // Solo días laborables (Lunes a Viernes)
+    if (dayOfWeek >= 1 && dayOfWeek <= 5) {
+      // Horarios típicos del entrevistador
+      const morningSlots = [
+        { time: '09:00:00', duration: 60, available: true },
+        { time: '10:00:00', duration: 60, available: Math.random() > 0.3 }, // 70% disponible
+        { time: '11:00:00', duration: 60, available: Math.random() > 0.4 }  // 60% disponible
+      ];
+      
+      const afternoonSlots = [
+        { time: '14:00:00', duration: 60, available: Math.random() > 0.2 }, // 80% disponible
+        { time: '15:00:00', duration: 60, available: Math.random() > 0.3 }, // 70% disponible
+        { time: '16:00:00', duration: 60, available: Math.random() > 0.5 }  // 50% disponible
+      ];
+      
+      const daySlots = [...morningSlots, ...afternoonSlots].filter(slot => slot.available);
+      
+      availability.push({
+        date: dateString,
+        dayOfWeek: ['DOMINGO', 'LUNES', 'MARTES', 'MIÉRCOLES', 'JUEVES', 'VIERNES', 'SÁBADO'][dayOfWeek],
+        isWorkingDay: true,
+        totalSlots: morningSlots.length + afternoonSlots.length,
+        availableSlots: daySlots.length,
+        slots: daySlots.map(slot => ({
+          startTime: slot.time,
+          duration: slot.duration,
+          available: slot.available
+        }))
+      });
+    } else {
+      // Fin de semana - no disponible
+      availability.push({
+        date: dateString,
+        dayOfWeek: ['DOMINGO', 'LUNES', 'MARTES', 'MIÉRCOLES', 'JUEVES', 'VIERNES', 'SÁBADO'][dayOfWeek],
+        isWorkingDay: false,
+        totalSlots: 0,
+        availableSlots: 0,
+        slots: []
+      });
+    }
+    
+    // Avanzar al siguiente día
+    currentDate.setDate(currentDate.getDate() + 1);
+  }
+  
+  // Calcular estadísticas generales
+  const totalWorkingDays = availability.filter(day => day.isWorkingDay).length;
+  const totalAvailableSlots = availability.reduce((sum, day) => sum + day.availableSlots, 0);
+  const totalSlots = availability.reduce((sum, day) => sum + day.totalSlots, 0);
+  
+  res.json({
+    success: true,
+    data: {
+      interviewerId: parseInt(interviewerId),
+      interviewer: {
+        id: interviewer.id,
+        name: interviewer.name,
+        role: interviewer.role,
+        subject: interviewer.subject
+      },
+      period: {
+        startDate,
+        endDate,
+        totalDays: availability.length,
+        workingDays: totalWorkingDays
+      },
+      summary: {
+        totalSlots,
+        availableSlots: totalAvailableSlots,
+        occupiedSlots: totalSlots - totalAvailableSlots,
+        availabilityRate: totalSlots > 0 ? ((totalAvailableSlots / totalSlots) * 100).toFixed(1) : 0
+      },
+      dailyAvailability: availability
+    }
+  });
 });
 
 // Mock de entrevistas agendadas
@@ -1311,83 +1126,7 @@ app.post('/api/interviews', async (req, res) => {
   }
 
   const client = await dbPool.connect();
-  let clientReleased = false;
   try {
-    // ✅ VALIDACIÓN 1: Verificar que no exista una entrevista activa del mismo tipo
-    console.log(`🔍 Verificando si existe entrevista ${type} para aplicación ${applicationId}...`);
-    const existingInterviewQuery = await client.query(
-      `SELECT id, interview_type, status, scheduled_date
-       FROM interviews
-       WHERE application_id = $1
-         AND interview_type = $2
-         AND status NOT IN ('CANCELLED', 'NO_SHOW')
-       LIMIT 1`,
-      [parseInt(applicationId), type]
-    );
-
-    if (existingInterviewQuery.rows.length > 0) {
-      const existing = existingInterviewQuery.rows[0];
-      const typeLabels = {
-        'INDIVIDUAL': 'Individual',
-        'FAMILY': 'Familiar',
-        'PSYCHOLOGICAL': 'Psicológica',
-        'ACADEMIC': 'Académica',
-        'BEHAVIORAL': 'Conductual'
-      };
-
-      console.log(`❌ Ya existe entrevista ${type} activa (ID: ${existing.id})`);
-
-      client.release();
-      clientReleased = true;
-      return res.status(409).json({
-        success: false,
-        error: `Ya existe una entrevista ${typeLabels[type]} activa para esta aplicación`,
-        details: {
-          existingInterviewId: existing.id,
-          type: existing.interview_type,
-          status: existing.status,
-          scheduledDate: existing.scheduled_date,
-          message: `Para agendar una nueva entrevista ${typeLabels[type]}, primero debe cancelar la entrevista existente (ID: ${existing.id})`
-        },
-        code: 'DUPLICATE_INTERVIEW_TYPE'
-      });
-    }
-
-    console.log(`✅ No existe entrevista ${type} activa, continuando...`);
-
-    // 🔒 VALIDACIÓN 2: Verificar que el slot no esté ocupado
-    const conflictQuery = `
-      SELECT id, scheduled_date, status
-      FROM interviews
-      WHERE interviewer_id = $1
-        AND scheduled_date = $2
-        AND status IN ('SCHEDULED', 'CONFIRMED', 'IN_PROGRESS')
-    `;
-
-    const conflictResult = await client.query(conflictQuery, [
-      parseInt(interviewerId),
-      normalizedScheduledDate
-    ]);
-
-    if (conflictResult.rows.length > 0) {
-      const existingInterview = conflictResult.rows[0];
-      console.log('❌ CONFLICTO DE HORARIO detectado:', existingInterview);
-
-      return res.status(409).json({
-        success: false,
-        error: 'SLOT_ALREADY_TAKEN',
-        message: 'Este horario ya está reservado. Por favor seleccione otro horario.',
-        details: {
-          interviewerId: interviewerId,
-          scheduledDate: normalizedScheduledDate,
-          existingInterviewId: existingInterview.id,
-          existingStatus: existingInterview.status
-        }
-      });
-    }
-
-    console.log('✅ Slot disponible, procediendo con la creación...');
-
     // Insertar la nueva entrevista en la base de datos
     const insertQuery = `
       INSERT INTO interviews (
@@ -1427,162 +1166,35 @@ app.post('/api/interviews', async (req, res) => {
 
     console.log('✅ Entrevista creada exitosamente:', newInterview);
 
-    // 📊 PASO 2: Obtener datos completos para respuesta (studentName, interviewerName, etc.)
-    const fullDataQuery = `
-      SELECT
-        i.id,
-        i.application_id as "applicationId",
-        i.interviewer_id as "interviewerId",
-        i.scheduled_date as "scheduledDate",
-        i.duration_minutes as duration,
-        i.interview_type as type,
-        i.status,
-        i.notes,
-        i.location,
-        i.created_at as "createdAt",
-        i.updated_at as "updatedAt",
-        CONCAT(s.first_name, ' ', s.paternal_last_name, ' ', COALESCE(s.maternal_last_name, '')) as "studentName",
-        g.full_name as "parentNames",
-        s.grade_applied as "gradeApplied",
-        CONCAT(u.first_name, ' ', u.last_name) as "interviewerName"
-      FROM interviews i
-      JOIN applications a ON i.application_id = a.id
-      JOIN students s ON a.student_id = s.id
-      JOIN guardians g ON a.guardian_id = g.id
-      JOIN users u ON i.interviewer_id = u.id
-      WHERE i.id = $1
-    `;
-
-    const fullDataResult = await client.query(fullDataQuery, [newInterview.id]);
-    const interviewData = fullDataResult.rows[0];
-
-    console.log('📋 Datos completos de entrevista para respuesta:', interviewData);
-
     // También agregar al array en memoria para compatibilidad con otros endpoints
     interviews.push({
-      id: interviewData.id,
-      applicationId: interviewData.applicationId,
-      interviewerId: interviewData.interviewerId,
-      scheduledDate: interviewData.scheduledDate,
-      duration: interviewData.duration,
-      type: interviewData.type,
+      id: newInterview.id,
+      applicationId: newInterview.applicationId,
+      interviewerId: newInterview.interviewerId,
+      scheduledDate: newInterview.scheduledDate,
+      duration: newInterview.duration,
+      type: newInterview.type,
       mode: mode || 'IN_PERSON',
-      status: interviewData.status,
-      location: interviewData.location,
-      notes: interviewData.notes,
-      createdAt: interviewData.createdAt,
-      studentName: interviewData.studentName,
-      interviewerName: interviewData.interviewerName,
-      parentNames: interviewData.parentNames,
-      gradeApplied: interviewData.gradeApplied
+      status: newInterview.status,
+      location: newInterview.location,
+      notes: newInterview.notes,
+      createdAt: newInterview.createdAt
     });
 
-    // PASO 3: Retornar respuesta inmediatamente
     res.status(201).json({
-      id: parseInt(interviewData.id),
-      applicationId: parseInt(interviewData.applicationId),
-      studentName: interviewData.studentName,
-      parentNames: interviewData.parentNames,
-      gradeApplied: interviewData.gradeApplied,
-      interviewerId: parseInt(interviewData.interviewerId),
-      interviewerName: interviewData.interviewerName,
-      status: interviewData.status,
-      type: interviewData.type,
-      mode: mode || 'IN_PERSON',
-      scheduledDate: interviewData.scheduledDate,
-      scheduledTime: scheduledTime || '00:00',
-      duration: interviewData.duration,
-      location: interviewData.location || '',
-      virtualMeetingLink: '',
-      notes: interviewData.notes || '',
-      preparation: '',
-      result: null,
-      score: null,
-      recommendations: '',
-      followUpRequired: false,
-      followUpNotes: '',
-      createdAt: interviewData.createdAt,
-      updatedAt: interviewData.updatedAt,
-      completedAt: null,
-      isUpcoming: true,
-      isOverdue: false,
-      canBeCompleted: interviewData.status === 'CONFIRMED' || interviewData.status === 'SCHEDULED',
-      canBeEdited: interviewData.status !== 'COMPLETED' && interviewData.status !== 'CANCELLED',
-      canBeCancelled: interviewData.status !== 'COMPLETED' && interviewData.status !== 'CANCELLED'
-    });
-
-    // 📧 PASO 4: Enviar notificaciones DESPUÉS de responder (en background)
-    setImmediate(async () => {
-      const notifClient = await dbPool.connect();
-      try {
-        // Obtener datos del apoderado y entrevistador para emails
-        const guardiansQuery = await notifClient.query(
-          `SELECT g.email, g.full_name, s.first_name as student_name, s.paternal_last_name as student_lastname
-           FROM applications a
-           JOIN guardians g ON a.guardian_id = g.id
-           JOIN students s ON a.student_id = s.id
-           WHERE a.id = $1`,
-          [parseInt(applicationId)]
-        );
-
-        const interviewerQuery = await notifClient.query(
-          `SELECT email, first_name, last_name
-           FROM users
-           WHERE id = $1`,
-          [parseInt(interviewerId)]
-        );
-
-        if (guardiansQuery.rows.length > 0) {
-          const guardian = guardiansQuery.rows[0];
-          const interviewer = interviewerQuery.rows[0];
-
-          // Formatear fecha/hora para mostrar
-          const interviewDate = new Date(newInterview.scheduledDate);
-          const dateStr = interviewDate.toLocaleDateString('es-CL');
-          const timeStr = interviewDate.toLocaleTimeString('es-CL', { hour: '2-digit', minute: '2-digit' });
-
-          // Enviar email al apoderado (sin await para no bloquear)
-          axios.post('http://localhost:8085/api/notifications/send', {
-            to: guardian.email,
-            subject: `Entrevista Agendada - ${guardian.student_name} ${guardian.student_lastname}`,
-            type: 'interview_scheduled_guardian',
-            data: {
-              guardianName: guardian.full_name,
-              studentName: `${guardian.student_name} ${guardian.student_lastname}`,
-              interviewType: type,
-              interviewDate: dateStr,
-              interviewTime: timeStr,
-              location: newInterview.location,
-              interviewerName: interviewer ? `${interviewer.first_name} ${interviewer.last_name}` : 'Por confirmar',
-              duration: newInterview.duration
-            }
-          }).catch(err => console.error('Error enviando email a apoderado:', err.message));
-
-          // Enviar email al entrevistador (sin await para no bloquear)
-          if (interviewer) {
-            axios.post('http://localhost:8085/api/notifications/send', {
-              to: interviewer.email,
-              subject: `Nueva Entrevista Asignada - ${guardian.student_name} ${guardian.student_lastname}`,
-              type: 'interview_scheduled_interviewer',
-              data: {
-                interviewerName: `${interviewer.first_name} ${interviewer.last_name}`,
-                studentName: `${guardian.student_name} ${guardian.student_lastname}`,
-                guardianName: guardian.full_name,
-                interviewType: type,
-                interviewDate: dateStr,
-                interviewTime: timeStr,
-                location: newInterview.location,
-                duration: newInterview.duration
-              }
-            }).catch(err => console.error('Error enviando email a entrevistador:', err.message));
-          }
-
-          console.log('✅ Notificaciones iniciadas en segundo plano');
-        }
-      } catch (emailError) {
-        console.error('⚠️ Error preparando notificaciones:', emailError.message);
-      } finally {
-        notifClient.release();
+      success: true,
+      data: {
+        id: newInterview.id,
+        applicationId: newInterview.applicationId,
+        interviewerId: newInterview.interviewerId,
+        scheduledDate: newInterview.scheduledDate,
+        duration: newInterview.duration,
+        type: newInterview.type,
+        mode: mode || 'IN_PERSON',
+        status: newInterview.status,
+        location: newInterview.location,
+        notes: newInterview.notes,
+        createdAt: newInterview.createdAt
       }
     });
 
@@ -1624,9 +1236,7 @@ app.post('/api/interviews', async (req, res) => {
       details: error.message
     });
   } finally {
-    if (!clientReleased) {
-      client.release();
-    }
+    client.release();
   }
 });
 
@@ -1719,13 +1329,10 @@ app.get('/api/interviews', async (req, res) => {
       };
     });
 
-    // Traducir estados y tipos al español antes de devolver
-    const translatedInterviews = translateInterviews(formattedInterviews);
-
     res.json({
       success: true,
-      data: translatedInterviews,
-      count: translatedInterviews.length
+      data: formattedInterviews,
+      count: formattedInterviews.length
     });
   } catch (error) {
     console.error('Database error:', error);
@@ -2096,64 +1703,6 @@ app.get('/api/interviews/statistics', (req, res) => {
   });
 });
 
-// 🔒 ENDPOINT DE VALIDACIÓN PREVENTIVA: Usado por drag-and-drop del calendario
-// Verifica si un slot específico está disponible para un entrevistador
-// IMPORTANTE: Este endpoint debe estar ANTES de /api/interviews/:id para evitar conflictos de rutas
-app.get('/api/interviews/availability', async (req, res) => {
-  const { interviewerId, date, time, excludeInterviewId } = req.query;
-
-  console.log('🔍 Verificando disponibilidad preventiva:', { interviewerId, date, time, excludeInterviewId });
-
-  if (!interviewerId || !date || !time) {
-    return res.status(400).json({
-      success: false,
-      error: 'Missing required parameters: interviewerId, date, time'
-    });
-  }
-
-  const client = await dbPool.connect();
-  try {
-    // Construir fecha/hora en formato esperado por la DB
-    const scheduledDateTime = `${date} ${time}:00`;
-
-    // Query para buscar conflictos
-    const query = `
-      SELECT id, status, scheduled_date
-      FROM interviews
-      WHERE interviewer_id = $1
-        AND scheduled_date = $2
-        AND status IN ('SCHEDULED', 'CONFIRMED', 'IN_PROGRESS')
-        ${excludeInterviewId ? 'AND id != $3' : ''}
-    `;
-
-    const params = [parseInt(interviewerId), scheduledDateTime];
-    if (excludeInterviewId) {
-      params.push(parseInt(excludeInterviewId));
-    }
-
-    const result = await client.query(query, params);
-    const isAvailable = result.rows.length === 0;
-
-    console.log(`${isAvailable ? '✅' : '❌'} Slot ${isAvailable ? 'disponible' : 'ocupado'} para interviewer ${interviewerId} en ${scheduledDateTime}`);
-
-    if (!isAvailable) {
-      console.log('📋 Conflicto encontrado:', result.rows[0]);
-    }
-
-    // Retornar boolean directo (true = disponible, false = ocupado)
-    res.json(isAvailable);
-  } catch (error) {
-    console.error('Error verificando disponibilidad preventiva:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Internal server error',
-      message: error.message
-    });
-  } finally {
-    client.release();
-  }
-});
-
 // Endpoint para obtener una entrevista específica
 app.get('/api/interviews/:id', (req, res) => {
   const interviewId = parseInt(req.params.id);
@@ -2466,68 +2015,38 @@ app.get('/api/evaluations/my-evaluations', async (req, res) => {
       SELECT
         e.id,
         e.application_id,
-        e.evaluation_type,
         e.status,
         e.score,
-        e.grade,
         e.observations,
-        e.strengths,
-        e.areas_for_improvement,
-        e.recommendations,
-        e.evaluation_date,
-        e.completion_date,
         e.created_at,
         e.updated_at,
-        s.first_name,
-        s.paternal_last_name,
-        s.maternal_last_name,
+        s.first_name || ' ' || s.paternal_last_name as student_name,
         s.grade_applied,
-        s.rut as student_rut,
-        s.email as student_email,
-        u.first_name as evaluator_first_name,
-        u.last_name as evaluator_last_name,
-        u.subject,
-        u.role
+        u.first_name || ' ' || u.last_name as evaluator_name,
+        u.subject
       FROM evaluations e
       JOIN applications a ON a.id = e.application_id
       JOIN students s ON s.id = a.student_id
       JOIN users u ON u.id = e.evaluator_id
       WHERE e.evaluator_id = $1
       ORDER BY e.created_at DESC
-      LIMIT 50
+      LIMIT 20
     `, [evaluatorId]);
     client.release();
 
     const evaluations = evaluationsQuery.rows.map(row => ({
       id: row.id,
       applicationId: row.application_id,
-      studentName: `${row.first_name} ${row.paternal_last_name} ${row.maternal_last_name || ''}`.trim(),
-      studentFirstName: row.first_name,
-      studentLastName: `${row.paternal_last_name} ${row.maternal_last_name || ''}`.trim(),
-      studentRut: row.student_rut,
-      studentEmail: row.student_email,
+      studentName: row.student_name,
       grade: row.grade_applied,
-      evaluationType: row.evaluation_type,
-      type: row.evaluation_type || 'ACADEMIC',
+      type: 'ACADEMIC',
       status: row.status || 'PENDING',
       assignedAt: row.created_at,
-      evaluationDate: row.evaluation_date,
-      completedAt: row.completion_date || row.updated_at,
+      completedAt: row.updated_at,
       dueDate: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(), // 14 days from now
-      subject: row.subject || getSubjectFromEvaluationType(row.evaluation_type),
-      subjectDisplay: getSubjectDisplayName(row.evaluation_type, row.subject),
+      subject: row.subject || 'Matemáticas',
       score: row.score,
-      scoreGrade: row.grade,
-      observations: row.observations,
-      strengths: row.strengths,
-      areasForImprovement: row.areas_for_improvement,
-      recommendations: row.recommendations,
-      evaluator: {
-        firstName: row.evaluator_first_name,
-        lastName: row.evaluator_last_name,
-        subject: row.subject,
-        role: row.role
-      }
+      observations: row.observations
     }));
 
     res.json(evaluations);
@@ -2893,6 +2412,7 @@ function getDayOfWeek(dateString) {
   const date = new Date(dateString);
   return days[date.getDay()];
 }
+
 // Check real interviewer availability based on configured schedules and existing interviews
 app.get('/api/interviews/availability/check', async (req, res) => {
   const { date, time, duration = 60, interviewType } = req.query;
@@ -3500,138 +3020,6 @@ app.post('/api/interviews/create-validated', async (req, res) => {
   }
 });
 
-// Manual endpoint to send interview summary email
-app.post('/api/interviews/application/:applicationId/send-summary', async (req, res) => {
-  const { applicationId } = req.params;
-
-  console.log(`📧 Enviando resumen de entrevistas para aplicación ${applicationId}`);
-
-  const client = await dbPool.connect();
-  try {
-    // 1. Verificar que todas las entrevistas requeridas estén agendadas
-    const allInterviewsQuery = await client.query(
-      `SELECT
-        i.id, i.interview_type, i.scheduled_date, i.duration_minutes, i.location,
-        u.first_name || ' ' || u.last_name as interviewer_name
-       FROM interviews i
-       JOIN users u ON i.interviewer_id = u.id
-       WHERE i.application_id = $1 AND i.status = 'SCHEDULED'
-       ORDER BY i.scheduled_date`,
-      [parseInt(applicationId)]
-    );
-
-    const requiredTypes = ['INDIVIDUAL', 'FAMILY', 'PSYCHOLOGICAL'];
-    const scheduledTypes = allInterviewsQuery.rows.map(r => r.interview_type);
-    const allRequiredScheduled = requiredTypes.every(type => scheduledTypes.includes(type));
-
-    if (!allRequiredScheduled) {
-      const missingTypes = requiredTypes.filter(type => !scheduledTypes.includes(type));
-      return res.status(400).json({
-        success: false,
-        error: 'No todas las entrevistas requeridas están agendadas',
-        details: {
-          required: requiredTypes,
-          scheduled: scheduledTypes,
-          missing: missingTypes
-        }
-      });
-    }
-
-    // 2. Obtener datos del estudiante y apoderado (usuario que creó la aplicación)
-    const studentQuery = await client.query(
-      `SELECT
-        a.id as application_id,
-        s.first_name || ' ' || s.paternal_last_name || ' ' || s.maternal_last_name as student_name,
-        u.email as applicant_email,
-        u.first_name || ' ' || u.last_name as applicant_name
-       FROM applications a
-       JOIN students s ON a.student_id = s.id
-       LEFT JOIN users u ON a.applicant_user_id = u.id
-       WHERE a.id = $1`,
-      [parseInt(applicationId)]
-    );
-
-    if (studentQuery.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: 'Aplicación no encontrada'
-      });
-    }
-
-    const applicationData = studentQuery.rows[0];
-
-    // Validar que exista el apoderado
-    if (!applicationData.applicant_email) {
-      return res.status(400).json({
-        success: false,
-        error: 'No se encontró el apoderado que creó la aplicación'
-      });
-    }
-
-    // 3. Formatear datos de las entrevistas para el email
-    const interviews = allInterviewsQuery.rows.map(interview => {
-      const dateObj = new Date(interview.scheduled_date);
-      return {
-        type: interview.interview_type,
-        date: dateObj.toLocaleDateString('es-CL', {
-          weekday: 'long',
-          year: 'numeric',
-          month: 'long',
-          day: 'numeric'
-        }),
-        time: dateObj.toLocaleTimeString('es-CL', {
-          hour: '2-digit',
-          minute: '2-digit'
-        }),
-        duration: interview.duration_minutes,
-        location: interview.location,
-        interviewer: interview.interviewer_name
-      };
-    });
-
-    // 4. Enviar el email al apoderado que creó la aplicación
-    console.log(`📬 Enviando email a ${applicationData.applicant_email}...`);
-
-    const emailResponse = await axios.post('http://localhost:8085/api/notifications/send', {
-      type: 'email',
-      recipient: applicationData.applicant_email,
-      subject: `Resumen de Entrevistas Agendadas - ${applicationData.student_name}`,
-      template: 'all_interviews_scheduled',
-      templateData: {
-        guardianName: applicationData.applicant_name,
-        studentName: applicationData.student_name,
-        totalInterviews: interviews.length,
-        interviews: interviews
-      }
-    });
-
-    console.log('✅ Email de resumen enviado exitosamente');
-
-    res.status(200).json({
-      success: true,
-      message: 'Resumen de entrevistas enviado exitosamente',
-      data: {
-        applicationId: parseInt(applicationId),
-        applicantEmail: applicationData.applicant_email,
-        applicantName: applicationData.applicant_name,
-        totalInterviews: interviews.length,
-        interviewsSent: interviews.length,
-        emailStatus: emailResponse.data
-      }
-    });
-
-  } catch (error) {
-    console.error('❌ Error enviando resumen de entrevistas:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Error enviando resumen de entrevistas',
-      details: error.message
-    });
-  } finally {
-    client.release();
-  }
-});
-
 // ===================================
 // EVALUATION MANAGEMENT ENDPOINTS
 // ===================================
@@ -3707,10 +3095,6 @@ app.get('/api/evaluations/evaluators/:role', async (req, res) => {
     let roleFilter = '';
 
     switch (role) {
-      case 'TEACHER':
-        // Return ALL teachers (any subject)
-        roleFilter = "role IN ('TEACHER', 'COORDINATOR')";
-        break;
       case 'TEACHER_MATHEMATICS':
         subjectFilter = 'MATHEMATICS';
         roleFilter = "role IN ('TEACHER', 'COORDINATOR')";
@@ -3756,8 +3140,7 @@ app.get('/api/evaluations/evaluators/:role', async (req, res) => {
       firstName: user.firstName,
       lastName: user.lastName,
       email: user.email,
-      role: user.role, // Usar el rol REAL del usuario desde la base de datos
-      subject: user.subject, // Incluir subject también
+      role: role, // Usar el rol solicitado para compatibilidad
       active: user.active
     }));
 
@@ -3791,10 +3174,6 @@ app.get('/api/evaluations/public/evaluators/:role', async (req, res) => {
     let roleFilter = '';
 
     switch (role) {
-      case 'TEACHER':
-        // Return ALL teachers (any subject)
-        roleFilter = "role IN ('TEACHER', 'COORDINATOR')";
-        break;
       case 'TEACHER_MATHEMATICS':
         subjectFilter = 'MATHEMATICS';
         roleFilter = "role IN ('TEACHER', 'COORDINATOR')";
@@ -3840,8 +3219,7 @@ app.get('/api/evaluations/public/evaluators/:role', async (req, res) => {
       firstName: user.firstName,
       lastName: user.lastName,
       email: user.email,
-      role: user.role, // Usar el rol REAL del usuario desde la base de datos
-      subject: user.subject, // Incluir subject también
+      role: role, // Usar el rol solicitado para compatibilidad
       active: user.active
     }));
 
@@ -3924,132 +3302,28 @@ app.post('/api/evaluations/public/assign/:applicationId', (req, res) => {
 });
 
 // Assign specific evaluation to specific evaluator
-app.post('/api/evaluations/assign/:applicationId/:evaluationType/:evaluatorId', async (req, res) => {
+app.post('/api/evaluations/assign/:applicationId/:evaluationType/:evaluatorId', (req, res) => {
   const { applicationId, evaluationType, evaluatorId } = req.params;
 
   console.log(`🎯 Assigning specific evaluation: ${evaluationType} to evaluator ${evaluatorId} for application ${applicationId}`);
 
-  const client = await dbPool.connect();
-  try {
-    // Check if evaluation already exists
-    const existingEvalQuery = `
-      SELECT id FROM evaluations
-      WHERE application_id = $1 AND evaluation_type = $2
-    `;
-
-    const existingEval = await client.query(existingEvalQuery, [
-      parseInt(applicationId),
-      evaluationType
-    ]);
-
-    if (existingEval.rows.length > 0) {
-      client.release();
-      return res.status(409).json({
-        error: 'Ya existe una evaluación de este tipo para esta aplicación',
-        existingEvaluationId: existingEval.rows[0].id
-      });
+  const evaluation = {
+    id: Date.now(),
+    evaluationType,
+    status: 'PENDING',
+    applicationId: parseInt(applicationId),
+    evaluatorId: parseInt(evaluatorId),
+    createdAt: new Date().toISOString(),
+    evaluator: {
+      id: parseInt(evaluatorId),
+      firstName: 'Evaluador',
+      lastName: 'Específico',
+      email: `evaluador${evaluatorId}@mtn.cl`
     }
+  };
 
-    // Insert evaluation into database
-    const insertQuery = `
-      INSERT INTO evaluations (
-        application_id,
-        evaluator_id,
-        evaluation_type,
-        status,
-        created_at,
-        updated_at
-      ) VALUES ($1, $2, $3, $4, NOW(), NOW())
-      RETURNING id, application_id, evaluator_id, evaluation_type, status, created_at, updated_at
-    `;
-
-    const result = await client.query(insertQuery, [
-      parseInt(applicationId),
-      parseInt(evaluatorId),
-      evaluationType,
-      'PENDING'
-    ]);
-
-    const newEvaluation = result.rows[0];
-
-    // Get evaluator details
-    const evaluatorQuery = await client.query(
-      'SELECT id, first_name, last_name, email, role, subject FROM users WHERE id = $1',
-      [parseInt(evaluatorId)]
-    );
-
-    const evaluator = evaluatorQuery.rows[0];
-
-    client.release();
-
-    const evaluation = {
-      id: newEvaluation.id,
-      evaluationType: newEvaluation.evaluation_type,
-      status: newEvaluation.status,
-      applicationId: newEvaluation.application_id,
-      evaluatorId: newEvaluation.evaluator_id,
-      createdAt: newEvaluation.created_at,
-      updatedAt: newEvaluation.updated_at,
-      evaluator: {
-        id: evaluator.id,
-        firstName: evaluator.first_name,
-        lastName: evaluator.last_name,
-        email: evaluator.email,
-        role: evaluator.role,
-        subject: evaluator.subject
-      }
-    };
-
-    console.log(`✅ Evaluation assigned successfully: ID=${evaluation.id}, Type=${evaluationType}, Evaluator=${evaluator.first_name} ${evaluator.last_name}`);
-
-    // Get student information for email
-    const studentQuery = await dbPool.query(`
-      SELECT s.first_name, s.paternal_last_name, s.maternal_last_name, s.grade_applied
-      FROM applications a
-      JOIN students s ON s.id = a.student_id
-      WHERE a.id = $1
-    `, [parseInt(applicationId)]);
-
-    const student = studentQuery.rows[0];
-
-    // Send email notification to evaluator
-    if (student && evaluator.email) {
-      const evaluationTypeES = {
-        'LANGUAGE_EXAM': 'Examen de Lenguaje',
-        'MATHEMATICS_EXAM': 'Examen de Matemáticas',
-        'ENGLISH_EXAM': 'Examen de Inglés',
-        'PSYCHOLOGIST_INTERVIEW': 'Entrevista Psicológica',
-        'DIRECTOR_INTERVIEW': 'Entrevista con Director',
-        'COORDINATOR_INTERVIEW': 'Entrevista con Coordinador'
-      };
-
-      const studentFullName = `${student.first_name} ${student.paternal_last_name} ${student.maternal_last_name || ''}`.trim();
-
-      try {
-        await axios.post('http://localhost:8085/api/notifications/send-evaluation-assignment', {
-          evaluatorEmail: evaluator.email,
-          evaluatorName: `${evaluator.first_name} ${evaluator.last_name}`,
-          studentName: studentFullName,
-          studentGrade: student.grade_applied,
-          evaluationType: evaluationTypeES[evaluationType] || evaluationType,
-          applicationId: applicationId
-        });
-        console.log(`📧 Email sent to ${evaluator.email} about ${studentFullName}`);
-      } catch (emailError) {
-        console.error('❌ Error sending evaluation assignment email:', emailError.message);
-        // Don't fail the assignment if email fails
-      }
-    }
-
-    // Also add to mock array for compatibility
-    mockEvaluations.push(evaluation);
-
-    res.json(evaluation);
-  } catch (error) {
-    client.release();
-    console.error('❌ Error assigning evaluation:', error);
-    res.status(500).json({ error: 'Error al asignar evaluación', details: error.message });
-  }
+  mockEvaluations.push(evaluation);
+  res.json(evaluation);
 });
 
 // Get evaluations by application
@@ -4200,7 +3474,7 @@ app.put('/api/evaluations/:evaluationId', async (req, res) => {
 
     // Build dynamic UPDATE query based on provided fields
     const allowedFields = [
-      'score', 'max_score', 'grade', 'observations', 'status',
+      'score', 'grade', 'observations', 'status',
       'academic_readiness', 'behavioral_assessment', 'emotional_maturity',
       'social_skills_assessment', 'motivation_assessment', 'family_support_assessment',
       'integration_potential', 'strengths', 'areas_for_improvement',
@@ -4211,17 +3485,10 @@ app.put('/api/evaluations/:evaluationId', async (req, res) => {
     const values = [];
     let paramIndex = 1;
 
-    // Map camelCase to snake_case for compatibility
-    const fieldMapping = {
-      'maxScore': 'max_score',
-      'areasForImprovement': 'areas_for_improvement'
-    };
-
     // Add updated_at automatically
     Object.keys(updateData).forEach(key => {
-      const dbKey = fieldMapping[key] || key;
-      if (allowedFields.includes(dbKey)) {
-        updates.push(`${dbKey} = $${paramIndex}`);
+      if (allowedFields.includes(key)) {
+        updates.push(`${key} = $${paramIndex}`);
         values.push(updateData[key]);
         paramIndex++;
       }
@@ -4254,12 +3521,7 @@ app.put('/api/evaluations/:evaluationId', async (req, res) => {
         created_at, updated_at, completion_date
     `;
 
-    console.log('🔍 Query:', query);
-    console.log('🔍 Values:', values);
-
-    // Circuit breaker temporarily disabled for writes due to closure issues
-    // TODO: Fix circuit breaker implementation for database write operations
-    const result = await client.query(query, values);
+    const result = await writeOperationBreaker.fire(client, query, values);
     client.release();
 
     if (result.rowCount === 0) {
@@ -4294,7 +3556,6 @@ app.get('/api/evaluations/:evaluationId', async (req, res) => {
         e.evaluator_id,
         e.evaluation_type,
         e.score,
-        e.max_score,
         e.grade,
         e.observations,
         e.status,
@@ -4627,7 +3888,7 @@ app.post('/api/evaluations/:evaluationId/attachments', upload.single('file'), as
       description || null
     ];
 
-    const result = await writeOperationBreaker.fire(() => client.query(query, values));
+    const result = await writeOperationBreaker.fire(client, query, values);
     client.release();
 
     console.log(`✅ File uploaded for evaluation ${evaluationId}: ${req.file.originalname}`);
@@ -4874,7 +4135,7 @@ app.post('/api/evaluations', async (req, res) => {
       'PENDING'
     ];
 
-    const result = await writeOperationBreaker.fire(() => client.query(query, values));
+    const result = await writeOperationBreaker.fire(client, query, values);
     client.release();
 
     const newEvaluation = result.rows[0];

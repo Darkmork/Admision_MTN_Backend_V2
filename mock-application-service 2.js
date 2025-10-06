@@ -1,5 +1,4 @@
 const express = require('express');
-const compression = require('compression');
 const { Pool } = require('pg');
 const CircuitBreaker = require('opossum');
 const axios = require('axios');
@@ -7,7 +6,6 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const PDFDocument = require('pdfkit');
-const { translateToSpanish } = require('./translations');
 const app = express();
 const port = 8083;
 
@@ -429,18 +427,6 @@ const handleDatabaseError = (error, correlationId) => {
 
 app.use(express.json({ limit: '10mb' }));
 
-// Response compression middleware
-app.use(compression({
-  filter: (req, res) => {
-    if (req.headers['x-no-compression']) {
-      return false;
-    }
-    return compression.filter(req, res);
-  },
-  threshold: 1024,
-  level: 6
-}));
-
 // Input validation helpers
 const validateRUT = (rut) => {
   if (!rut || typeof rut !== 'string') return false;
@@ -751,14 +737,8 @@ app.get('/api/applications', async (req, res) => {
         profession: row.mother_profession
       } : null
     }));
-
-    // Traducir estados de applications al español
-    const translatedApplications = applications.map(app => ({
-      ...app,
-      status: translateToSpanish(app.status, 'application_status')
-    }));
-
-    res.json(translatedApplications);
+    
+    res.json(applications);
 
   } catch (error) {
     const errorInfo = handleDatabaseError(error, req.correlationId);
@@ -1524,18 +1504,12 @@ app.get('/api/applications/:id', async (req, res) => {
         m.email as mother_email,
         m.phone as mother_phone,
         m.profession as mother_profession,
-        m.address as mother_address,
-
-        -- Applicant user information (guardian who created the application)
-        au.email as applicant_email,
-        au.first_name as applicant_first_name,
-        au.last_name as applicant_last_name
+        m.address as mother_address
 
       FROM applications a
       LEFT JOIN students s ON s.id = a.student_id
       LEFT JOIN parents f ON f.id = a.father_id AND f.parent_type = 'FATHER'
       LEFT JOIN parents m ON m.id = a.mother_id AND m.parent_type = 'MOTHER'
-      LEFT JOIN users au ON au.id = a.applicant_user_id
       WHERE a.id = $1
     `;
 
@@ -1656,14 +1630,7 @@ app.get('/api/applications/:id', async (req, res) => {
         profession: row.mother_profession,
         address: row.mother_address
       } : null,
-
-      // Applicant user (guardian who created the application)
-      applicantUser: row.applicant_email ? {
-        email: row.applicant_email,
-        firstName: row.applicant_first_name,
-        lastName: row.applicant_last_name
-      } : null,
-
+      
       // Interviews
       interviews: interviewsResult.rows.map(interview => ({
         id: interview.id,
@@ -1977,8 +1944,8 @@ app.post('/api/applications', authenticateToken, validateApplicationInput, async
   }
 });
 
-// Update application with real database integration (no validation middleware - uses nested structure)
-app.put('/api/applications/:id', authenticateToken, async (req, res) => {
+// Update application with real database integration
+app.put('/api/applications/:id', authenticateToken, validateApplicationInput, async (req, res) => {
   const applicationId = parseInt(req.params.id);
 
   if (!applicationId || isNaN(applicationId)) {
@@ -2079,17 +2046,18 @@ app.put('/api/applications/:id', authenticateToken, async (req, res) => {
       // Update father if provided
       if (father && existingApp.father_id) {
         const fatherUpdateQuery = `
-          UPDATE parents SET
+          UPDATE parents SET 
             full_name = COALESCE($1, full_name),
             rut = COALESCE($2, rut),
             email = COALESCE($3, email),
             phone = COALESCE($4, phone),
             profession = COALESCE($5, profession),
             address = COALESCE($6, address),
+            workplace = COALESCE($7, workplace),
             updated_at = NOW()
-          WHERE id = $7
+          WHERE id = $8
         `;
-
+        
         await client.query(fatherUpdateQuery, [
           father.fullName,
           father.rut,
@@ -2097,6 +2065,7 @@ app.put('/api/applications/:id', authenticateToken, async (req, res) => {
           father.phone,
           father.profession || father.occupation,
           father.address,
+          father.workplace || father.workPlace,
           existingApp.father_id
         ]);
       }
@@ -2104,17 +2073,18 @@ app.put('/api/applications/:id', authenticateToken, async (req, res) => {
       // Update mother if provided
       if (mother && existingApp.mother_id) {
         const motherUpdateQuery = `
-          UPDATE parents SET
+          UPDATE parents SET 
             full_name = COALESCE($1, full_name),
             rut = COALESCE($2, rut),
             email = COALESCE($3, email),
             phone = COALESCE($4, phone),
             profession = COALESCE($5, profession),
             address = COALESCE($6, address),
+            workplace = COALESCE($7, workplace),
             updated_at = NOW()
-          WHERE id = $7
+          WHERE id = $8
         `;
-
+        
         await client.query(motherUpdateQuery, [
           mother.fullName,
           mother.rut,
@@ -2122,6 +2092,7 @@ app.put('/api/applications/:id', authenticateToken, async (req, res) => {
           mother.phone,
           mother.profession || mother.occupation,
           mother.address,
+          mother.workplace || mother.workPlace,
           existingApp.mother_id
         ]);
       }
@@ -2244,97 +2215,6 @@ app.put('/api/applications/:id', authenticateToken, async (req, res) => {
 
 // ============= MISSING ENDPOINTS REQUIRED BY FRONTEND =============
 
-// Final admission decision endpoint - Approve or Reject application with email notification
-app.post('/api/applications/:id/final-decision', authenticateToken, async (req, res) => {
-  const client = await dbPool.connect();
-  try {
-    const applicationId = parseInt(req.params.id);
-    const { decision, note } = req.body; // decision: 'APPROVED' or 'REJECTED', note: optional message
-
-    // Validar decisión
-    if (!decision || !['APPROVED', 'REJECTED'].includes(decision)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Decisión inválida. Debe ser APPROVED o REJECTED'
-      });
-    }
-
-    // Obtener información completa de la aplicación
-    const appResult = await client.query(`
-      SELECT
-        a.id,
-        a.status as current_status,
-        s.first_name,
-        s.paternal_last_name,
-        s.maternal_last_name,
-        s.grade_applied,
-        u.email as guardian_email,
-        u.first_name as guardian_name
-      FROM applications a
-      JOIN students s ON s.id = a.student_id
-      LEFT JOIN users u ON a.applicant_user_id = u.id
-      WHERE a.id = $1
-    `, [applicationId]);
-
-    if (appResult.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Aplicación no encontrada'
-      });
-    }
-
-    const application = appResult.rows[0];
-
-    // Actualizar estado de la aplicación
-    const newStatus = decision === 'APPROVED' ? 'APPROVED' : 'REJECTED';
-    await client.query(
-      'UPDATE applications SET status = $1, updated_at = NOW() WHERE id = $2',
-      [newStatus, applicationId]
-    );
-
-    // Enviar notificación por email
-    const templateType = decision === 'APPROVED' ? 'ACCEPTANCE' : 'REJECTION';
-    const emailData = {
-      studentName: application.student_name,
-      guardianName: application.guardian_name,
-      gradeApplied: application.grade_applied,
-      admissionNote: decision === 'APPROVED' ? note : undefined,
-      rejectionReason: decision === 'REJECTED' ? note : undefined
-    };
-
-    try {
-      await axios.post('http://localhost:8085/api/notifications/send', {
-        to: application.guardian_email,
-        templateType: templateType,
-        data: emailData
-      });
-      console.log(`📧 Email de ${decision === 'APPROVED' ? 'aceptación' : 'rechazo'} enviado a:`, application.guardian_email);
-    } catch (emailError) {
-      console.error('❌ Error enviando email:', emailError.message);
-      // No fallar la operación si el email falla
-    }
-
-    res.json({
-      success: true,
-      message: `Aplicación ${decision === 'APPROVED' ? 'aprobada' : 'rechazada'} exitosamente`,
-      data: {
-        id: applicationId,
-        status: translateToSpanish(newStatus, 'application_status'),
-        emailSent: true
-      }
-    });
-
-  } catch (error) {
-    console.error('❌ Error en decisión final:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al procesar la decisión final'
-    });
-  } finally {
-    client.release();
-  }
-});
-
 // Archive application endpoint - required by applicationService.ts:347
 app.put('/api/applications/:id/archive', authenticateToken, async (req, res) => {
   const client = await dbPool.connect();
@@ -2432,7 +2312,7 @@ app.patch('/api/applications/:id/status', authenticateToken, async (req, res) =>
     // Get current application with student info
     const currentAppQuery = `
       SELECT a.*,
-             s.first_name, s.paternal_last_name, s.maternal_last_name, s.email as student_email,
+             s.first_name, s.last_name, s.email as student_email,
              u.email as guardian_email, u.first_name as guardian_first_name
       FROM applications a
       LEFT JOIN students s ON a.student_id = s.id
@@ -2490,7 +2370,7 @@ app.patch('/api/applications/:id/status', authenticateToken, async (req, res) =>
 
     // Send notification to guardian about status change
     const guardianEmail = currentApp.rows[0].guardian_email;
-    const studentName = `${currentApp.rows[0].first_name} ${currentApp.rows[0].paternal_last_name} ${currentApp.rows[0].maternal_last_name || ''}`.trim();
+    const studentName = `${currentApp.rows[0].first_name} ${currentApp.rows[0].last_name}`;
 
     if (guardianEmail) {
       try {
