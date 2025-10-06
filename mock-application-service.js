@@ -8,6 +8,8 @@ const path = require('path');
 const fs = require('fs');
 const PDFDocument = require('pdfkit');
 const { translateToSpanish } = require('./translations');
+const { validateRUT } = require('./utils/validateRUT');
+const { logAudit, getClientIp, getUserAgent, AuditActions, EntityTypes } = require('./utils/auditLogger');
 const app = express();
 const port = 8083;
 
@@ -136,6 +138,62 @@ setupBreakerEvents(externalServiceBreaker, 'External');
 
 // Legacy breaker for backward compatibility (maps to medium query breaker)
 const queryWithCircuitBreaker = mediumQueryBreaker;
+
+// ============= RESPONSE UTILITY FUNCTIONS =============
+// Standard response format helpers to ensure API contract consistency
+
+const now = () => new Date().toISOString();
+
+/**
+ * Success response for single entity
+ * @param {Object} data - The data object to return
+ * @param {Object} meta - Optional metadata (merged into response)
+ * @returns {Object} Standardized success response
+ */
+const ok = (data, meta = {}) => ({
+  success: true,
+  data,
+  timestamp: now(),
+  ...meta
+});
+
+/**
+ * Success response for paginated lists
+ * @param {Array} items - Array of items to return
+ * @param {Object} pagination - Pagination info: { total, page, limit }
+ * @returns {Object} Standardized paginated response
+ */
+const page = (items, { total, page = 0, limit = items?.length ?? 10 } = {}) => {
+  const totalPages = limit > 0 ? Math.ceil(total / limit) : 1;
+  const hasNext = page < totalPages - 1;
+  const hasPrev = page > 0;
+
+  return {
+    success: true,
+    data: items,
+    total,
+    page,
+    limit,
+    totalPages,
+    hasNext,
+    hasPrev,
+    timestamp: now()
+  };
+};
+
+/**
+ * Error response
+ * @param {string} error - Human-readable error message
+ * @param {Object} options - Error details: { errorCode, details, status }
+ * @returns {Object} Standardized error response
+ */
+const fail = (error, { errorCode = 'GEN_000', details = {}, status = 400 } = {}) => ({
+  success: false,
+  error,
+  errorCode,
+  details,
+  timestamp: now()
+});
 
 // ============= FILE UPLOAD CONFIGURATION =============
 
@@ -651,6 +709,16 @@ app.get('/health', (req, res) => {
 app.get('/api/applications', async (req, res) => {
   const client = await dbPool.connect();
   try {
+    // Extract pagination parameters
+    const pageNum = parseInt(req.query.page) || 0;
+    const limit = parseInt(req.query.limit) || 20;
+    const offset = pageNum * limit;
+
+    // Query to count total applications (exclude soft-deleted)
+    const countQuery = `SELECT COUNT(*) as total FROM applications WHERE deleted_at IS NULL`;
+    const countResult = await queryWithCircuitBreaker.fire(client, countQuery, []);
+    const total = parseInt(countResult.rows[0].total);
+
     // Query to get applications with student, parent and evaluation details
     const query = `
       SELECT
@@ -698,10 +766,12 @@ app.get('/api/applications', async (req, res) => {
       LEFT JOIN students s ON s.id = a.student_id
       LEFT JOIN parents f ON f.id = a.father_id AND f.parent_type = 'FATHER'
       LEFT JOIN parents m ON m.id = a.mother_id AND m.parent_type = 'MOTHER'
+      WHERE a.deleted_at IS NULL
       ORDER BY a.created_at DESC
+      LIMIT $1 OFFSET $2
     `;
 
-    const result = await queryWithCircuitBreaker.fire(client, query, []);
+    const result = await queryWithCircuitBreaker.fire(client, query, [limit, offset]);
     
     // Transform the data to the expected format
     const applications = result.rows.map(row => ({
@@ -758,16 +828,15 @@ app.get('/api/applications', async (req, res) => {
       status: translateToSpanish(app.status, 'application_status')
     }));
 
-    res.json(translatedApplications);
+    // Return standardized paginated response
+    res.json(page(translatedApplications, { total, page: pageNum, limit }));
 
   } catch (error) {
     const errorInfo = handleDatabaseError(error, req.correlationId);
-    res.status(errorInfo.status).json({
-      success: false,
-      error: errorInfo.message,
-      correlationId: req.correlationId,
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+    res.status(errorInfo.status).json(fail(errorInfo.message, {
+      errorCode: 'APP_LIST_001',
+      details: { correlationId: req.correlationId }
+    }));
   } finally {
     client.release();
   }
@@ -822,7 +891,7 @@ app.get('/api/applications/search', async (req, res) => {
       sortOrder = 'DESC',    // ASC or DESC
 
       // Pagination
-      page = 0,  // 0-based pagination (0 = first page)
+      page: pageNum = 0,  // 0-based pagination (0 = first page)
       limit = 20
     } = req.query;
 
@@ -936,7 +1005,7 @@ app.get('/api/applications/search', async (req, res) => {
     const sortDirection = sortOrder.toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
     // Calculate pagination (0-based: page 0 = first page)
-    const pageNum = parseInt(page);
+    // pageNum already declared from destructuring above
     const limitNum = parseInt(limit);
     const offset = pageNum * limitNum;  // page 0 → offset 0, page 1 → offset 20, etc.
 
@@ -1077,50 +1146,27 @@ app.get('/api/applications/search', async (req, res) => {
       nextInterviewDate: row.next_interview_date
     }));
 
-    // Build response with pagination metadata (0-based)
-    res.json({
-      success: true,
-      data: applications,
-      pagination: {
-        page: pageNum,
-        limit: limitNum,
-        total: totalResults,
-        totalPages: Math.ceil(totalResults / limitNum),
-        hasNext: ((pageNum + 1) * limitNum) < totalResults,
-        hasPrev: pageNum > 0
-      },
-      filters: {
-        search,
-        status,
-        gradeApplied,
-        academicYear,
-        documentsComplete,
-        hasSpecialNeeds,
-        sortBy: sortField,
-        sortOrder: sortDirection
-      },
-      timestamp: new Date().toISOString()
-    });
+    // Build response with standardized pagination
+    res.json(page(applications, {
+      total: totalResults,
+      page: pageNum,
+      limit: limitNum
+    }));
 
   } catch (error) {
     console.error('❌ Error in enhanced application search:', error);
 
     if (error.message && error.message.includes('breaker')) {
-      return res.status(503).json({
-        success: false,
-        error: 'Service temporarily unavailable - circuit breaker open',
-        code: 'CIRCUIT_BREAKER_OPEN',
-        message: 'El servicio está temporalmente sobrecargado. Por favor, intenta nuevamente en unos minutos.',
-        retryAfter: 30
-      });
+      return res.status(503).json(fail('Service temporarily unavailable - circuit breaker open', {
+        errorCode: 'CIRCUIT_BREAKER_OPEN',
+        details: { retryAfter: 30 }
+      }));
     }
 
-    res.status(500).json({
-      success: false,
-      error: 'Error en búsqueda avanzada de postulaciones',
-      message: error.message,
-      correlationId: req.correlationId
-    });
+    res.status(500).json(fail('Error en búsqueda avanzada de postulaciones', {
+      errorCode: 'APP_SEARCH_001',
+      details: { correlationId: req.correlationId, message: error.message }
+    }));
   } finally {
     client.release();
   }
@@ -1311,6 +1357,51 @@ app.get('/api/applications/public/all', async (req, res) => {
       success: true,
       data: mockApplications,
       total: mockApplications.length
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// Get application statistics - QA Test requirement
+app.get('/api/applications/stats', authenticateToken, async (req, res) => {
+  const client = await dbPool.connect();
+  try {
+    // Get counts by status
+    const statusQuery = await client.query(`
+      SELECT status, COUNT(*) as count
+      FROM applications
+      GROUP BY status
+    `);
+
+    // Get total count
+    const totalQuery = await client.query('SELECT COUNT(*) as total FROM applications');
+    const total = parseInt(totalQuery.rows[0].total);
+
+    // Build flat stats object
+    const stats = {
+      total: total,
+      pending: 0,
+      under_review: 0,
+      exam_scheduled: 0,
+      approved: 0,
+      rejected: 0,
+      waitlisted: 0
+    };
+
+    // Populate stats from query
+    statusQuery.rows.forEach(row => {
+      const status = row.status.toLowerCase();
+      stats[status] = parseInt(row.count);
+    });
+
+    console.log('📊 Application stats:', stats);
+    res.json(stats);
+  } catch (error) {
+    console.error('❌ Error getting application stats:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al obtener estadísticas de postulaciones'
     });
   } finally {
     client.release();
@@ -1712,20 +1803,16 @@ app.get('/api/applications/:id', async (req, res) => {
         totalSteps: 5
       }
     };
-    
-    res.json({
-      success: true,
-      data: application
-    });
+
+    // Return unwrapped application object (no success/data/timestamp wrapper)
+    res.json(application);
 
   } catch (error) {
     const errorInfo = handleDatabaseError(error, req.correlationId);
-    res.status(errorInfo.status).json({
-      success: false,
-      error: errorInfo.message,
-      correlationId: req.correlationId,
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+    res.status(errorInfo.status).json(fail(errorInfo.message, {
+      errorCode: 'APP_GET_001',
+      details: { correlationId: req.correlationId }
+    }));
   } finally {
     client.release();
   }
@@ -1744,6 +1831,15 @@ app.post('/api/applications', authenticateToken, validateApplicationInput, async
     await client.query('BEGIN');
 
     try {
+      // Validate student RUT
+      if (body.rut && !validateRUT(body.rut)) {
+        await client.query('ROLLBACK');
+        return res.status(400).json(fail(
+          'RUT del estudiante inválido. Verifique el formato y dígito verificador.',
+          { errorCode: 'APP_002', details: { field: 'rut', value: body.rut } }
+        ));
+      }
+
       // Insert student using flat structure from frontend
       const studentQuery = `
         INSERT INTO students (
@@ -1766,7 +1862,7 @@ app.post('/api/applications', authenticateToken, validateApplicationInput, async
         body.studentEmail || null,
         body.schoolApplied || 'MONTE_TABOR' // default school
       ]);
-      
+
       const studentId = studentResult.rows[0].id;
       
       let fatherId = null;
@@ -1890,7 +1986,24 @@ app.post('/api/applications', authenticateToken, validateApplicationInput, async
 
       // Commit transaction
       await client.query('COMMIT');
-      
+
+      // Audit log: Application created
+      await logAudit(dbPool, {
+        userId: applicantUserId || null,
+        action: AuditActions.CREATE,
+        entityType: EntityTypes.APPLICATION,
+        entityId: application.id,
+        oldValues: null,
+        newValues: {
+          status: 'PENDING',
+          studentId: studentId,
+          applicationYear: applicationYear,
+          submissionDate: application.submission_date
+        },
+        ipAddress: getClientIp(req),
+        userAgent: getUserAgent(req)
+      });
+
       // Send notification for new application
       const primaryEmail = body.parent1Email || body.parent2Email || body.studentEmail;
       if (primaryEmail) {
@@ -2284,6 +2397,7 @@ app.post('/api/applications/:id/final-decision', authenticateToken, async (req, 
     }
 
     const application = appResult.rows[0];
+    const oldStatus = application.status;
 
     // Actualizar estado de la aplicación
     const newStatus = decision === 'APPROVED' ? 'APPROVED' : 'REJECTED';
@@ -2291,6 +2405,18 @@ app.post('/api/applications/:id/final-decision', authenticateToken, async (req, 
       'UPDATE applications SET status = $1, updated_at = NOW() WHERE id = $2',
       [newStatus, applicationId]
     );
+
+    // Audit log: Status change
+    await logAudit(dbPool, {
+      userId: req.user ? parseInt(req.user.userId) : null,
+      action: AuditActions.STATUS_CHANGE,
+      entityType: EntityTypes.APPLICATION,
+      entityId: applicationId,
+      oldValues: { status: oldStatus },
+      newValues: { status: newStatus, decision: decision, note: note },
+      ipAddress: getClientIp(req),
+      userAgent: getUserAgent(req)
+    });
 
     // Enviar notificación por email
     const templateType = decision === 'APPROVED' ? 'ACCEPTANCE' : 'REJECTION';

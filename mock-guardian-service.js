@@ -19,6 +19,7 @@ const compression = require('compression');
 const CircuitBreaker = require('opossum');
 const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
+const { validateRUT } = require('./utils/validateRUT');
 const app = express();
 const port = 8087; // Puerto diferente al user-service y notification-service
 
@@ -124,6 +125,70 @@ const setupBreakerEvents = (breaker, name) => {
 setupBreakerEvents(simpleQueryBreaker, 'Simple');
 setupBreakerEvents(mediumQueryBreaker, 'Medium');
 setupBreakerEvents(writeOperationBreaker, 'Write');
+
+// ============= STANDARDIZED RESPONSE HELPERS =============
+/**
+ * Standardized response wrapper for all API responses
+ * Ensures consistent contract with frontend
+ */
+const ResponseHelper = {
+  /**
+   * Success response for single entity
+   * @param {Object} data - The data to return
+   * @returns {Object} Standardized response with success, data, timestamp
+   */
+  ok(data) {
+    return {
+      success: true,
+      data: data,
+      timestamp: new Date().toISOString()
+    };
+  },
+
+  /**
+   * Success response for paginated lists
+   * @param {Array} items - Array of items
+   * @param {Object} meta - Pagination metadata {total, page, limit}
+   * @returns {Object} Standardized paginated response
+   */
+  page(items, meta) {
+    const { total, page, limit } = meta;
+    const totalPages = Math.ceil(total / limit);
+    const hasNext = page < totalPages - 1;
+    const hasPrev = page > 0;
+
+    return {
+      success: true,
+      data: items,
+      total: total,
+      page: page,
+      limit: limit,
+      totalPages: totalPages,
+      hasNext: hasNext,
+      hasPrev: hasPrev,
+      timestamp: new Date().toISOString()
+    };
+  },
+
+  /**
+   * Error response
+   * @param {String} error - Error message
+   * @param {Object} options - Optional {errorCode, details}
+   * @returns {Object} Standardized error response
+   */
+  fail(error, options = {}) {
+    const response = {
+      success: false,
+      error: error,
+      timestamp: new Date().toISOString()
+    };
+
+    if (options.errorCode) response.errorCode = options.errorCode;
+    if (options.details) response.details = options.details;
+
+    return response;
+  }
+};
 
 // Middleware to simulate JWT verification for guardians
 const authenticateGuardian = (req, res, next) => {
@@ -248,34 +313,52 @@ const guardians = [
 // Obtener todos los apoderados (protegido - solo admin/staff)
 app.get('/api/guardians', authenticateGuardian, (req, res) => {
   const activeOnly = req.query.active === 'true';
+  const page = parseInt(req.query.page) || 0;
+  const limit = parseInt(req.query.limit) || 10;
+
   let filteredGuardians = guardians;
-  
+
   if (activeOnly) {
     filteredGuardians = guardians.filter(g => g.active);
   }
 
-  res.json({
-    success: true,
-    data: filteredGuardians,
-    count: filteredGuardians.length
-  });
+  const total = filteredGuardians.length;
+  const startIndex = page * limit;
+  const endIndex = startIndex + limit;
+  const paginatedData = filteredGuardians.slice(startIndex, endIndex);
+
+  const response = ResponseHelper.page(paginatedData, { total, page, limit });
+  response.guardians = paginatedData;  // Add guardians field for frontend
+  res.json(response);
+});
+
+// Estadísticas de apoderados
+app.get('/api/guardians/stats', authenticateGuardian, (req, res) => {
+  const stats = {
+    totalGuardians: guardians.length,
+    activeGuardians: guardians.filter(g => g.active).length,
+    verifiedEmails: guardians.filter(g => g.emailVerified).length,
+    relationshipTypes: {
+      madre: guardians.filter(g => g.relationshipType === 'MADRE').length,
+      padre: guardians.filter(g => g.relationshipType === 'PADRE').length,
+      tutor: guardians.filter(g => g.relationshipType === 'TUTORA' || g.relationshipType === 'TUTOR').length,
+      otros: guardians.filter(g => !['MADRE', 'PADRE', 'TUTORA', 'TUTOR'].includes(g.relationshipType)).length
+    },
+    totalApplications: guardians.reduce((acc, g) => acc + g.applicantIds.length, 0)
+  };
+
+  res.json(ResponseHelper.ok(stats));
 });
 
 // Obtener apoderado por ID
 app.get('/api/guardians/:id', authenticateGuardian, (req, res) => {
   const guardianId = parseInt(req.params.id);
   const guardian = guardians.find(g => g.id === guardianId);
-  
+
   if (guardian) {
-    res.json({
-      success: true,
-      data: guardian
-    });
+    res.json(ResponseHelper.ok(guardian));
   } else {
-    res.status(404).json({
-      success: false,
-      error: 'Apoderado no encontrado'
-    });
+    res.status(404).json(ResponseHelper.fail('Apoderado no encontrado', { errorCode: 'GUARDIAN_404' }));
   }
 });
 
@@ -283,17 +366,11 @@ app.get('/api/guardians/:id', authenticateGuardian, (req, res) => {
 app.get('/api/guardians/by-application/:applicationId', authenticateGuardian, (req, res) => {
   const applicationId = parseInt(req.params.applicationId);
   const guardian = guardians.find(g => g.applicantIds.includes(applicationId));
-  
+
   if (guardian) {
-    res.json({
-      success: true,
-      data: guardian
-    });
+    res.json(ResponseHelper.ok(guardian));
   } else {
-    res.status(404).json({
-      success: false,
-      error: 'No se encontró apoderado para esta postulación'
-    });
+    res.status(404).json(ResponseHelper.fail('No se encontró apoderado para esta postulación', { errorCode: 'GUARDIAN_NOT_FOUND_FOR_APP' }));
   }
 });
 
@@ -329,6 +406,22 @@ app.post('/api/guardians/auth/register', async (req, res) => {
   const { firstName, lastName, email, rut, phone, address, relationshipType, password } = req.body;
 
   try {
+    // Validate required fields
+    if (!firstName || !lastName || !email || !rut) {
+      return res.status(400).json(ResponseHelper.fail(
+        'Campos requeridos faltantes: firstName, lastName, email, rut',
+        { errorCode: 'VAL_001', details: { missing: ['firstName', 'lastName', 'email', 'rut'].filter(f => !req.body[f]) } }
+      ));
+    }
+
+    // Validate Chilean RUT
+    if (!validateRUT(rut)) {
+      return res.status(400).json(ResponseHelper.fail(
+        'RUT inválido. Verifique el formato y dígito verificador.',
+        { errorCode: 'APP_002', details: { field: 'rut', value: rut } }
+      ));
+    }
+
     // Verificar si ya existe en la base de datos
     const existingCheck = await dbPool.query(
       'SELECT id FROM guardians WHERE email = $1 OR rut = $2',
@@ -338,7 +431,8 @@ app.post('/api/guardians/auth/register', async (req, res) => {
     if (existingCheck.rows.length > 0) {
       return res.status(400).json({
         success: false,
-        error: 'Ya existe un apoderado con este email o RUT'
+        error: 'Ya existe un apoderado con este email o RUT',
+        errorCode: 'RES_409'
       });
     }
 
@@ -454,27 +548,6 @@ app.put('/api/guardians/:id', authenticateGuardian, (req, res) => {
   res.json({
     success: true,
     data: updatedData
-  });
-});
-
-// Estadísticas de apoderados
-app.get('/api/guardians/stats', authenticateGuardian, (req, res) => {
-  const stats = {
-    totalGuardians: guardians.length,
-    activeGuardians: guardians.filter(g => g.active).length,
-    verifiedEmails: guardians.filter(g => g.emailVerified).length,
-    relationshipTypes: {
-      madre: guardians.filter(g => g.relationshipType === 'MADRE').length,
-      padre: guardians.filter(g => g.relationshipType === 'PADRE').length,
-      tutor: guardians.filter(g => g.relationshipType === 'TUTORA' || g.relationshipType === 'TUTOR').length,
-      otros: guardians.filter(g => !['MADRE', 'PADRE', 'TUTORA', 'TUTOR'].includes(g.relationshipType)).length
-    },
-    totalApplications: guardians.reduce((acc, g) => acc + g.applicantIds.length, 0)
-  };
-  
-  res.json({
-    success: true,
-    data: stats
   });
 });
 
