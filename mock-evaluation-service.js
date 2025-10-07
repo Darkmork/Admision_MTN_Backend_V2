@@ -4418,6 +4418,87 @@ app.put('/api/evaluations/:evaluationId', async (req, res) => {
   }
 });
 
+// Get global evaluation statistics
+app.get('/api/evaluations/stats', async (req, res) => {
+  const client = await dbPool.connect();
+  try {
+    console.log('📊 Getting global evaluation statistics');
+
+    // Get counts by status
+    const statusQuery = `
+      SELECT
+        status,
+        COUNT(*) as count
+      FROM evaluations
+      GROUP BY status
+    `;
+    const statusResult = await client.query(statusQuery);
+
+    // Get counts by type
+    const typeQuery = `
+      SELECT
+        evaluation_type,
+        COUNT(*) as count
+      FROM evaluations
+      GROUP BY evaluation_type
+      ORDER BY count DESC
+    `;
+    const typeResult = await client.query(typeQuery);
+
+    // Get total count
+    const totalQuery = `SELECT COUNT(*) as total FROM evaluations`;
+    const totalResult = await client.query(totalQuery);
+
+    // Build status counts object
+    const statusCounts = {
+      PENDING: 0,
+      IN_PROGRESS: 0,
+      COMPLETED: 0,
+      REVIEWED: 0,
+      APPROVED: 0
+    };
+
+    statusResult.rows.forEach(row => {
+      statusCounts[row.status] = parseInt(row.count);
+    });
+
+    // Build type counts object
+    const typeCounts = {};
+    typeResult.rows.forEach(row => {
+      typeCounts[row.evaluation_type] = parseInt(row.count);
+    });
+
+    const stats = {
+      success: true,
+      data: {
+        total: parseInt(totalResult.rows[0].total),
+        byStatus: statusCounts,
+        byType: typeCounts,
+        // Calculated metrics
+        completedCount: statusCounts.COMPLETED + statusCounts.REVIEWED + statusCounts.APPROVED,
+        pendingCount: statusCounts.PENDING,
+        inProgressCount: statusCounts.IN_PROGRESS,
+        completionPercentage: totalResult.rows[0].total > 0
+          ? Math.round(((statusCounts.COMPLETED + statusCounts.REVIEWED + statusCounts.APPROVED) / totalResult.rows[0].total) * 100)
+          : 0
+      }
+    };
+
+    console.log('✅ Statistics generated:', stats.data);
+    res.json(stats);
+
+  } catch (error) {
+    console.error('❌ Error getting evaluation statistics:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error getting statistics',
+      message: error.message
+    });
+  } finally {
+    client.release();
+  }
+});
+
 // Get evaluation by ID
 app.get('/api/evaluations/:evaluationId', async (req, res) => {
   const { evaluationId } = req.params;
