@@ -11,12 +11,19 @@ const PORT = process.env.PORT || 8080;
 
 // CORS configuration
 const corsOptions = {
-  origin: [
-    'https://admision-mtn-frontend.vercel.app',
-    'https://admision-mtn-frontend-rjgxcdfzq-camilos-projects-6e6d295f.vercel.app',
-    'http://localhost:5173',
-    'http://localhost:5174'
-  ],
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl)
+    if (!origin) return callback(null, true);
+
+    // Allow all Vercel preview deployments and production
+    if (origin.includes('vercel.app') ||
+        origin.includes('localhost:5173') ||
+        origin.includes('localhost:5174')) {
+      return callback(null, true);
+    }
+
+    callback(new Error('Not allowed by CORS'));
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'x-correlation-id', 'x-request-time', 'x-timezone', 'x-client-type', 'x-client-version'],
@@ -103,6 +110,15 @@ const setupRoutes = (app) => {
 
   app.get('/api/guardians/health', (req, res) => {
     res.json({ service: 'guardians', status: 'UP' });
+  });
+
+  // Public key endpoint (returns null to indicate encryption is not available)
+  app.get('/api/auth/public-key', (req, res) => {
+    res.json({
+      publicKey: null,
+      encryptionAvailable: false,
+      message: 'Credential encryption is not enabled. Using direct authentication.'
+    });
   });
 
   // Authentication endpoint
