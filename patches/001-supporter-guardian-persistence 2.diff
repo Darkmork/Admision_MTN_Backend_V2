@@ -1,0 +1,128 @@
+diff --git a/mock-application-service.js b/mock-application-service.js
+index 1234567..abcdefg 100644
+--- a/mock-application-service.js
++++ b/mock-application-service.js
+@@ -1382,6 +1382,48 @@ app.post('/api/applications', authenticateToken, validateApplicationInput, asyn
+         motherId = motherResult.rows[0].id;
+       }
+
++      // Insert supporter (sostenedor) - REQUIRED
++      let supporterId = null;
++      if (body.supporterName) {
++        const supporterQuery = `
++          INSERT INTO supporters (
++            full_name, rut, email, phone, relationship, created_at, updated_at
++          ) VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
++          RETURNING id
++        `;
++
++        const supporterResult = await queryWithCircuitBreaker.fire(client, supporterQuery, [
++          body.supporterName,
++          body.supporterRut || null,
++          body.supporterEmail || null,
++          body.supporterPhone || null,
++          body.supporterRelation || 'OTRO'
++        ]);
++
++        supporterId = supporterResult.rows[0].id;
++      }
++
++      // Insert guardian (apoderado) - REQUIRED
++      let guardianId = null;
++      if (body.guardianName) {
++        const guardianQuery = `
++          INSERT INTO guardians (
++            full_name, rut, email, phone, relationship, created_at, updated_at
++          ) VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
++          RETURNING id
++        `;
++
++        const guardianResult = await queryWithCircuitBreaker.fire(client, guardianQuery, [
++          body.guardianName,
++          body.guardianRut || null,
++          body.guardianEmail || null,
++          body.guardianPhone || null,
++          body.guardianRelation || 'OTRO'
++        ]);
++
++        guardianId = guardianResult.rows[0].id;
++      }
++
+       // Insert application with application year validation
+       const currentYear = new Date().getFullYear();
+       const applicationYear = parseInt(body.applicationYear) || currentYear + 1;
+@@ -1392,11 +1434,11 @@ app.post('/api/applications', authenticateToken, validateApplicationInput, asyn
+
+       const applicationQuery = `
+         INSERT INTO applications (
+-          student_id, father_id, mother_id, applicant_user_id, status,
++          student_id, father_id, mother_id, supporter_id, guardian_id, applicant_user_id, status,
+           submission_date, additional_notes, application_year, created_at, updated_at
+-        ) VALUES ($1, $2, $3, $4, 'PENDING', NOW(), $5, $6, NOW(), NOW())
++        ) VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', NOW(), $7, $8, NOW(), NOW())
+         RETURNING id, status, submission_date, application_year, created_at, updated_at
+       `;
+
+       const applicationResult = await queryWithCircuitBreaker.fire(client, applicationQuery, [
+         studentId,
+         fatherId,
+         motherId,
++        supporterId,
++        guardianId,
+         applicantUserId,
+         body.additionalNotes || null,
+         applicationYear
+@@ -966,6 +1008,16 @@ app.get('/api/applications/my-applications', authenticateToken, async (req, res
+         p_mother.phone as mother_phone,
+         p_mother.profession as mother_profession,
+         p_mother.address as mother_address,
++        sup.full_name as supporter_name,
++        sup.rut as supporter_rut,
++        sup.email as supporter_email,
++        sup.phone as supporter_phone,
++        sup.relationship as supporter_relationship,
++        gua.full_name as guardian_name,
++        gua.rut as guardian_rut,
++        gua.email as guardian_email,
++        gua.phone as guardian_phone,
++        gua.relationship as guardian_relationship,
+         u.email as applicant_email,
+         u.first_name as applicant_first_name,
+         u.last_name as applicant_last_name
+@@ -973,6 +1025,8 @@ app.get('/api/applications/my-applications', authenticateToken, async (req, res
+       JOIN students s ON s.id = a.student_id
+       LEFT JOIN parents p_father ON p_father.id = a.father_id
+       LEFT JOIN parents p_mother ON p_mother.id = a.mother_id
++      LEFT JOIN supporters sup ON sup.id = a.supporter_id
++      LEFT JOIN guardians gua ON gua.id = a.guardian_id
+       LEFT JOIN users u ON u.id = a.applicant_user_id
+       WHERE u.email = $1
+       ORDER BY a.created_at DESC
+@@ -1014,14 +1068,14 @@ app.get('/api/applications/my-applications', authenticateToken, async (req, res
+         address: row.mother_address || 'Dirección no especificada'
+       },
+       supporter: {
+-        fullName: row.father_name || 'Nombre no especificado',
+-        rut: row.father_rut || 'RUT no especificado',
+-        email: row.father_email || 'Email no especificado',
+-        phone: row.father_phone || 'Teléfono no especificado',
+-        relationship: 'Padre'
++        fullName: row.supporter_name || 'Nombre no especificado',
++        rut: row.supporter_rut || 'RUT no especificado',
++        email: row.supporter_email || 'Email no especificado',
++        phone: row.supporter_phone || 'Teléfono no especificado',
++        relationship: row.supporter_relationship || 'No especificada'
+       },
+       guardian: {
+-        fullName: row.mother_name || 'Nombre no especificado',
+-        rut: row.mother_rut || 'RUT no especificado',
+-        email: row.mother_email || 'Email no especificado',
+-        phone: row.mother_phone || 'Teléfono no especificado',
+-        relationship: 'Madre'
++        fullName: row.guardian_name || 'Nombre no especificado',
++        rut: row.guardian_rut || 'RUT no especificado',
++        email: row.guardian_email || 'Email no especificado',
++        phone: row.guardian_phone || 'Teléfono no especificado',
++        relationship: row.guardian_relationship || 'No especificada'
+       },
+       applicantUser: {

@@ -206,7 +206,7 @@ JWT_EXPIRATION_TIME=86400000
 SMTP_HOST=smtp.gmail.com
 SMTP_PORT=587
 SMTP_USERNAME=jorge.gangale@mtn.cl
-SMTP_PASSWORD=yaejhysibcgifpng
+SMTP_PASSWORD=${SMTP_PASSWORD}  # Load from environment - NEVER commit real password
 EMAIL_MOCK_MODE=true
 
 # Services

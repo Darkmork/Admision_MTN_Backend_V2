@@ -1,0 +1,103 @@
+# ============================================================
+# CRONTAB CONFIGURATION FOR BACKUP SYSTEM
+# Sistema de Backup Automático - Admisión MTN
+# ============================================================
+#
+# INSTALLATION:
+#   1. Edit this file with your actual paths
+#   2. Run: crontab -e
+#   3. Copy and paste the content below
+#   4. Save and exit
+#
+# VERIFICATION:
+#   crontab -l     # List current crontab
+#
+# LOGS:
+#   Check logs at: backup-system/logs/
+#
+# ============================================================
+
+# Set shell and PATH for cron
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+
+# Base directory for backup scripts
+BACKUP_SCRIPTS="/Users/jorgegangale/Library/Mobile Documents/com~apple~CloudDocs/Proyectos/Admision_MTN/Admision_MTN_backend/backup-system/scripts"
+
+# ============================================================
+# FULL BACKUP - Daily at 2:00 AM
+# Runs every day at 02:00 (server should be least active)
+# ============================================================
+0 2 * * * ${BACKUP_SCRIPTS}/full-backup.sh >> /tmp/full-backup-cron.log 2>&1
+
+# ============================================================
+# DIFFERENTIAL BACKUP - Hourly (every hour on the hour)
+# Runs at minute 0 of every hour (except during full backup hour)
+# ============================================================
+0 0-1,3-23 * * * ${BACKUP_SCRIPTS}/differential-backup.sh >> /tmp/diff-backup-cron.log 2>&1
+
+# ============================================================
+# MONITORING & REPORTING
+# ============================================================
+
+# Health check every 6 hours (00:30, 06:30, 12:30, 18:30)
+30 */6 * * * ${BACKUP_SCRIPTS}/monitor-backups.sh >> /tmp/monitor-backups-cron.log 2>&1
+
+# Daily summary report at 8:00 AM (after full backup completes)
+0 8 * * * ${BACKUP_SCRIPTS}/monitor-backups.sh >> /tmp/monitor-backups-cron.log 2>&1
+
+# ============================================================
+# CLEANUP TASKS
+# ============================================================
+
+# Weekly cleanup of old logs - Every Sunday at 3:00 AM
+0 3 * * 0 find /Users/jorgegangale/Library/Mobile\ Documents/com~apple~CloudDocs/Proyectos/Admision_MTN/Admision_MTN_backend/backup-system/logs -name "*.log" -mtime +90 -delete
+
+# Weekly cleanup of old metrics - Every Sunday at 3:15 AM
+15 3 * * 0 find /Users/jorgegangale/Library/Mobile\ Documents/com~apple~CloudDocs/Proyectos/Admision_MTN/Admision_MTN_backend/backup-system/logs/metrics -name "*.json" -mtime +90 -delete
+
+# ============================================================
+# CRON SCHEDULE REFERENCE
+# ============================================================
+# ┌───────────── minute (0 - 59)
+# │ ┌───────────── hour (0 - 23)
+# │ │ ┌───────────── day of month (1 - 31)
+# │ │ │ ┌───────────── month (1 - 12)
+# │ │ │ │ ┌───────────── day of week (0 - 6) (Sunday to Saturday)
+# │ │ │ │ │
+# * * * * * command to execute
+#
+# Examples:
+#   0 2 * * *     → Daily at 2:00 AM
+#   */15 * * * *  → Every 15 minutes
+#   0 */6 * * *   → Every 6 hours
+#   0 0 * * 0     → Weekly on Sunday at midnight
+#   0 0 1 * *     → Monthly on the 1st at midnight
+# ============================================================
+
+# ============================================================
+# ALTERNATIVE SCHEDULE FOR PRODUCTION (Higher Frequency)
+# ============================================================
+# Uncomment these and comment out the above if you need more frequent backups
+#
+# Full backup twice daily (2 AM and 2 PM)
+# 0 2,14 * * * ${BACKUP_SCRIPTS}/full-backup.sh >> /tmp/full-backup-cron.log 2>&1
+#
+# Differential backup every 30 minutes
+# */30 * * * * ${BACKUP_SCRIPTS}/differential-backup.sh >> /tmp/diff-backup-cron.log 2>&1
+#
+# Monitoring every 2 hours
+# 0 */2 * * * ${BACKUP_SCRIPTS}/monitor-backups.sh >> /tmp/monitor-backups-cron.log 2>&1
+# ============================================================
+
+# ============================================================
+# MACOS SPECIFIC NOTES
+# ============================================================
+# On macOS, you might need to grant Full Disk Access to cron:
+#   1. System Preferences → Security & Privacy → Privacy
+#   2. Select "Full Disk Access"
+#   3. Add /usr/sbin/cron
+#
+# Alternatively, use launchd instead of cron (recommended for macOS)
+# See: backup-system/config/launchd-example.plist
+# ============================================================

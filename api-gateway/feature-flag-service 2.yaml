@@ -1,0 +1,338 @@
+# Feature Flag Management Service for MTN API Gateway
+# Provides real-time feature flag management and traffic routing control
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: feature-flag-service
+  namespace: mtn-gateway
+  labels:
+    app: feature-flag-service
+    component: gateway
+    environment: production
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: feature-flag-service
+  template:
+    metadata:
+      labels:
+        app: feature-flag-service
+        component: gateway
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/actuator/prometheus"
+    spec:
+      serviceAccountName: feature-flag-service
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        fsGroup: 1001
+      containers:
+      - name: feature-flag-service
+        image: ghcr.io/mtn-org/feature-flag-service:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        - name: grpc
+          containerPort: 9090
+          protocol: TCP
+        env:
+        - name: SPRING_PROFILES_ACTIVE
+          value: "kubernetes,production"
+        - name: REDIS_HOST
+          value: "redis.mtn-gateway.svc.cluster.local"
+        - name: REDIS_PORT
+          value: "6379"
+        - name: POSTGRES_HOST
+          value: "postgres.mtn-gateway.svc.cluster.local"
+        - name: POSTGRES_PORT
+          value: "5432"
+        - name: POSTGRES_DB
+          value: "feature_flags"
+        - name: POSTGRES_USER
+          valueFrom:
+            secretRef:
+              name: feature-flag-secrets
+              key: postgres_user
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretRef:
+              name: feature-flag-secrets
+              key: postgres_password
+        - name: JWT_SECRET
+          valueFrom:
+            secretRef:
+              name: feature-flag-secrets
+              key: jwt_secret
+        - name: ADMIN_API_KEY
+          valueFrom:
+            secretRef:
+              name: feature-flag-secrets
+              key: admin_api_key
+        livenessProbe:
+          httpGet:
+            path: /actuator/health/liveness
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /actuator/health/readiness
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          failureThreshold: 3
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 256Mi
+        volumeMounts:
+        - name: config
+          mountPath: /app/config
+          readOnly: true
+        - name: feature-flags
+          mountPath: /app/feature-flags
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: feature-flag-config
+      - name: feature-flags
+        configMap:
+          name: feature-flags-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: feature-flag-service
+  namespace: mtn-gateway
+  labels:
+    app: feature-flag-service
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: nlb
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http
+    protocol: TCP
+  - name: grpc
+    port: 9090
+    targetPort: grpc
+    protocol: TCP
+  selector:
+    app: feature-flag-service
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: feature-flag-service
+  namespace: mtn-gateway
+  labels:
+    app: feature-flag-service
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: feature-flag-service
+  namespace: mtn-gateway
+rules:
+- apiGroups: [""]
+  resources: ["configmaps", "secrets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["create", "update", "patch"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["get", "list", "patch", "update"]
+- apiGroups: ["configuration.konghq.com"]
+  resources: ["kongplugins", "kongingresses"]
+  verbs: ["get", "list", "patch", "update"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: feature-flag-service
+  namespace: mtn-gateway
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: feature-flag-service
+subjects:
+- kind: ServiceAccount
+  name: feature-flag-service
+  namespace: mtn-gateway
+
+---
+# Feature Flag Management API ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: feature-flag-config
+  namespace: mtn-gateway
+  labels:
+    app: feature-flag-service
+data:
+  application.yml: |
+    server:
+      port: 8080
+      shutdown: graceful
+      
+    management:
+      endpoints:
+        web:
+          exposure:
+            include: health,info,metrics,prometheus
+      endpoint:
+        health:
+          show-details: always
+      metrics:
+        export:
+          prometheus:
+            enabled: true
+    
+    spring:
+      application:
+        name: feature-flag-service
+      profiles:
+        active: kubernetes,production
+      datasource:
+        url: jdbc:postgresql://${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+        username: ${POSTGRES_USER}
+        password: ${POSTGRES_PASSWORD}
+        driver-class-name: org.postgresql.Driver
+      jpa:
+        hibernate:
+          ddl-auto: validate
+        show-sql: false
+        database-platform: org.hibernate.dialect.PostgreSQLDialect
+      redis:
+        host: ${REDIS_HOST}
+        port: ${REDIS_PORT}
+        timeout: 2000ms
+        
+    feature-flags:
+      cache:
+        ttl: 300  # 5 minutes
+        refresh-interval: 60  # 1 minute
+      api:
+        rate-limit: 1000
+        auth-required: true
+      services:
+        kong-admin-url: http://kong-admin.kong-system.svc.cluster.local:8001
+        
+    logging:
+      level:
+        com.mtn.featureflags: INFO
+      pattern:
+        console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+
+  feature_flag_schema.sql: |
+    -- Feature Flag Service Database Schema
+    CREATE TABLE IF NOT EXISTS feature_flags (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255) NOT NULL UNIQUE,
+        description TEXT,
+        enabled BOOLEAN NOT NULL DEFAULT false,
+        rollout_percentage INTEGER NOT NULL DEFAULT 0 CHECK (rollout_percentage >= 0 AND rollout_percentage <= 100),
+        canary_percentage INTEGER NOT NULL DEFAULT 0 CHECK (canary_percentage >= 0 AND canary_percentage <= 100),
+        targeting_rules JSONB,
+        metadata JSONB,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        created_by VARCHAR(255),
+        updated_by VARCHAR(255)
+    );
+    
+    CREATE TABLE IF NOT EXISTS service_routes (
+        id SERIAL PRIMARY KEY,
+        service_name VARCHAR(255) NOT NULL,
+        path_patterns TEXT[] NOT NULL,
+        methods TEXT[] NOT NULL DEFAULT '{"GET","POST","PUT","DELETE"}',
+        weight INTEGER NOT NULL DEFAULT 100 CHECK (weight >= 0 AND weight <= 100),
+        canary_weight INTEGER NOT NULL DEFAULT 0 CHECK (canary_weight >= 0 AND canary_weight <= 100),
+        feature_flags TEXT[],
+        metadata JSONB,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );
+    
+    CREATE TABLE IF NOT EXISTS traffic_splits (
+        id SERIAL PRIMARY KEY,
+        route_id INTEGER REFERENCES service_routes(id),
+        version VARCHAR(50) NOT NULL,
+        weight INTEGER NOT NULL CHECK (weight >= 0 AND weight <= 100),
+        target_service VARCHAR(255) NOT NULL,
+        health_check_path VARCHAR(255) DEFAULT '/actuator/health',
+        enabled BOOLEAN NOT NULL DEFAULT true,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );
+    
+    CREATE TABLE IF NOT EXISTS flag_evaluations (
+        id SERIAL PRIMARY KEY,
+        flag_name VARCHAR(255) NOT NULL,
+        user_id VARCHAR(255),
+        user_role VARCHAR(50),
+        evaluated_value BOOLEAN NOT NULL,
+        targeting_matched BOOLEAN DEFAULT false,
+        metadata JSONB,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    );
+    
+    -- Indexes for performance
+    CREATE INDEX IF NOT EXISTS idx_feature_flags_enabled ON feature_flags(enabled);
+    CREATE INDEX IF NOT EXISTS idx_service_routes_service_name ON service_routes(service_name);
+    CREATE INDEX IF NOT EXISTS idx_flag_evaluations_flag_name ON flag_evaluations(flag_name);
+    CREATE INDEX IF NOT EXISTS idx_flag_evaluations_created_at ON flag_evaluations(created_at);
+    
+    -- Insert initial feature flag data
+    INSERT INTO feature_flags (name, description, enabled, rollout_percentage, targeting_rules) VALUES
+    ('microservices_migration', 'Enable microservices architecture migration', true, 100, '{"user_roles": ["ADMIN", "TEACHER", "COORDINATOR"], "beta_users": true}'),
+    ('user_service_routing', 'Route user management to user-service', true, 100, '{"sticky_sessions": true}'),
+    ('application_service_routing', 'Route application management to application-service', true, 100, '{"file_upload_enhanced": true}'),
+    ('evaluation_service_routing', 'Route evaluations to evaluation-service', true, 100, '{"real_time_updates": true}'),
+    ('notification_service_routing', 'Route notifications to notification-service', true, 100, '{"email_templates_v2": true}'),
+    ('enhanced_security', 'Enhanced security features', true, 100, '{"rate_limiting": {"enabled": true, "requests_per_minute": 1000}}'),
+    ('canary_deployments', 'Canary deployment capabilities', true, 100, '{"automatic_promotion": true, "success_rate_threshold": 0.99}')
+    ON CONFLICT (name) DO NOTHING;
+    
+    INSERT INTO service_routes (service_name, path_patterns, methods, weight, feature_flags) VALUES
+    ('user-service', ARRAY['/api/users/**', '/api/auth/**'], ARRAY['GET','POST','PUT','DELETE'], 100, ARRAY['user_service_routing']),
+    ('application-service', ARRAY['/api/applications/**', '/api/documents/**'], ARRAY['GET','POST','PUT','DELETE'], 100, ARRAY['application_service_routing']),
+    ('evaluation-service', ARRAY['/api/evaluations/**', '/api/interviews/**'], ARRAY['GET','POST','PUT','DELETE'], 100, ARRAY['evaluation_service_routing']),
+    ('notification-service', ARRAY['/api/notifications/**', '/api/email/**'], ARRAY['GET','POST'], 100, ARRAY['notification_service_routing']),
+    ('admision-monolith', ARRAY['/api/legacy/**'], ARRAY['GET','POST','PUT','DELETE'], 0, ARRAY[]::TEXT[])
+    ON CONFLICT DO NOTHING;
+
+---
+# Secrets for Feature Flag Service
+apiVersion: v1
+kind: Secret
+metadata:
+  name: feature-flag-secrets
+  namespace: mtn-gateway
+  labels:
+    app: feature-flag-service
+type: Opaque
+data:
+  # Base64 encoded values - Replace with actual production secrets
+  postgres_user: ZmVhdHVyZV9mbGFnX3VzZXI=  # feature_flag_user
+  postgres_password: Y2hhbmdlLWluLXByb2R1Y3Rpb24=  # change-in-production
+  jwt_secret: bXRuLWZlYXR1cmUtZmxhZy1qd3Qtc2VjcmV0LXZlcnktbG9uZw==  # mtn-feature-flag-jwt-secret-very-long
+  admin_api_key: YWRtaW4ta2V5LWNoYW5nZS1pbi1wcm9kdWN0aW9u  # admin-key-change-in-production

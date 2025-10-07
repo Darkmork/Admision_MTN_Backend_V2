@@ -464,9 +464,9 @@ app.get('/api/dashboard/stats', async (req, res) => {
     const response = {
       success: true,
       data: realStats,
+      ...realStats,  // Flatten stats to root
       timestamp: new Date().toISOString()
     };
-
     // Cache for 5 minutes
     dashboardCache.set(cacheKey, response, 300000);
     res.json(response);
@@ -654,9 +654,9 @@ app.get('/api/dashboard/admin/stats', async (req, res) => {
     const response = {
       success: true,
       data: realStats,
+      ...realStats,  // Flatten stats to root
       timestamp: new Date().toISOString()
     };
-
     // Cache for 3 minutes
     dashboardCache.set(cacheKey, response, 180000);
     res.json(response);
@@ -1026,19 +1026,20 @@ app.get('/api/analytics/temporal-trends', async (req, res) => {
       ? ((currentMonthApplications - lastMonthApplications) / lastMonthApplications) * 100
       : 0;
 
-    const trends = {
+    const trendsData = {
       monthlyApplications,
       currentMonthApplications,
       lastMonthApplications,
       monthlyGrowthRate: Math.round(monthlyGrowthRate * 100) / 100
     };
 
-    // Cache for 15 minutes
-    dashboardCache.set(cacheKey, trends, 900000);
-    res.json(trends);
+    // Cache for 15 minutes with standard wrapper - wrap in 'trends' field
+    const response = { success: true, data: { trends: trendsData }, trends: trendsData, timestamp: new Date().toISOString() };
+    dashboardCache.set(cacheKey, response, 900000);
+    res.json(response);
   } catch (error) {
     // Fallback to mock data
-    res.json({
+    const mockTrends = {
       monthlyApplications: {
         '2024-10': 45,
         '2024-11': 52,
@@ -1056,7 +1057,8 @@ app.get('/api/analytics/temporal-trends', async (req, res) => {
       currentMonthApplications: 42,
       lastMonthApplications: 88,
       monthlyGrowthRate: -52.27
-    });
+    };
+    res.json(ResponseHelper.ok(mockTrends));
   } finally {
     client.release();
   }
@@ -1126,11 +1128,18 @@ app.get('/api/analytics/insights', (req, res) => {
     }
   ];
 
-  res.json({
-    recommendations,
-    totalInsights: recommendations.length
-  });
-});
+  // Use standard response format with 'insights' field
+  const response = {
+    success: true,
+    data: {
+      insights: recommendations,
+      totalInsights: recommendations.length
+    },
+    insights: recommendations,
+    totalInsights: recommendations.length,
+    timestamp: new Date().toISOString()
+  };
+  res.json(response);});
 
 app.get('/api/analytics/complete-analytics', async (req, res) => {
   try {
@@ -1325,30 +1334,25 @@ app.get('/api/dashboard/admin/detailed-stats', async (req, res) => {
 
     const academicYears = academicYearsQuery.rows.map(row => row.application_year);
 
-    const response = {
-      success: true,
-      data: {
-        academicYear: yearFilter,
-        availableYears: academicYears,
-        weeklyInterviews: {
-          total: parseInt(weeklyInterviews.total),
-          scheduled: parseInt(weeklyInterviews.scheduled),
-          completed: parseInt(weeklyInterviews.completed),
-          weekRange: {
-            start: startOfWeek.toISOString(),
-            end: endOfWeek.toISOString()
-          }
-        },
-        pendingEvaluations: {
-          byType: pendingEvaluations,
-          total: Object.values(pendingEvaluations).reduce((sum, count) => sum + count, 0)
-        },
-        monthlyTrends,
-        statusBreakdown
+    // Build complete detailed stats object
+    const detailedStats = {
+      academicYear: yearFilter,
+      totalApplications: Object.values(statusBreakdown).reduce((sum, val) => sum + val, 0),
+      weeklyInterviews: {
+        total: parseInt(weeklyInterviews.total || 0),
+        scheduled: parseInt(weeklyInterviews.scheduled || 0),
+        completed: parseInt(weeklyInterviews.completed || 0)
       },
-      timestamp: new Date().toISOString()
+      pendingEvaluationsByType: pendingEvaluations,
+      monthlyApplicationTrends: monthlyTrends,
+      statusBreakdown: statusBreakdown,
+      availableAcademicYears: academicYears
     };
 
+    // Return flattened response (QA expects academicYear at root)
+    const response = {
+      ...detailedStats  // Flatten all fields to root level
+    };
     // Cache for 5 minutes
     dashboardCache.set(cacheKey, response, 300000);
     res.json(response);
@@ -1375,6 +1379,64 @@ app.get('/api/dashboard/admin/detailed-stats', async (req, res) => {
     client.release();
   }
 });
+
+// ============= STANDARDIZED RESPONSE HELPERS =============
+/**
+ * Standardized response wrapper for all API responses
+ * Ensures consistent contract with frontend
+ */
+const ResponseHelper = {
+  /**
+   * Success response for single entity
+   * @param {Object} data - The data to return
+   * @returns {Object} Standardized response with success, data, timestamp
+   */
+  ok(data) {
+    return {
+      success: true,
+      data: data,
+      timestamp: new Date().toISOString()
+    };
+  },
+
+  /**
+   * Success response for paginated lists
+   * @param {Array} items - Array of items
+   * @param {Object} meta - Pagination metadata {total, page, limit}
+   * @returns {Object} Standardized paginated response
+   */
+  page(items, meta) {
+    const { total, page, limit } = meta;
+    return {
+      success: true,
+      data: items,
+      total: total,
+      page: page,
+      limit: limit,
+      totalPages: Math.ceil(total / limit),
+      timestamp: new Date().toISOString()
+    };
+  },
+
+  /**
+   * Error response
+   * @param {String} error - Error message
+   * @param {Object} options - Optional {errorCode, details}
+   * @returns {Object} Standardized error response
+   */
+  fail(error, options = {}) {
+    const response = {
+      success: true,
+      data: realStats,
+      ...realStats,  // Flatten stats to root
+      timestamp: new Date().toISOString()
+    };
+    if (options.errorCode) response.errorCode = options.errorCode;
+    if (options.details) response.details = options.details;
+
+    return response;
+  }
+};
 
 // Health check
 app.get('/health', (req, res) => {

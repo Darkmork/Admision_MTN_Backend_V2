@@ -237,6 +237,64 @@ setInterval(() => {
   }
 }, 300000);
 
+// ============= STANDARDIZED RESPONSE HELPERS =============
+/**
+ * Standardized response wrapper for all API responses
+ * Ensures consistent contract with frontend
+ */
+const ResponseHelper = {
+  /**
+   * Success response for single entity
+   * @param {Object} data - The data to return
+   * @returns {Object} Standardized response with success, data, timestamp
+   */
+  ok(data) {
+    return {
+      success: true,
+      data: data,
+      timestamp: new Date().toISOString()
+    };
+  },
+
+  /**
+   * Success response for paginated lists
+   * @param {Array} items - Array of items
+   * @param {Object} meta - Pagination metadata {total, page, limit}
+   * @returns {Object} Standardized paginated response
+   */
+  page(items, meta) {
+    const { total, page, limit } = meta;
+    return {
+      success: true,
+      data: items,
+      total: total,
+      page: page,
+      limit: limit,
+      totalPages: Math.ceil(total / limit),
+      timestamp: new Date().toISOString()
+    };
+  },
+
+  /**
+   * Error response
+   * @param {String} error - Error message
+   * @param {Object} options - Optional {errorCode, details}
+   * @returns {Object} Standardized error response
+   */
+  fail(error, options = {}) {
+    const response = {
+      success: false,
+      error: error,
+      timestamp: new Date().toISOString()
+    };
+
+    if (options.errorCode) response.errorCode = options.errorCode;
+    if (options.details) response.details = options.details;
+
+    return response;
+  }
+};
+
 app.use(express.json());
 app.use(compression({
   filter: (req, res) => {
@@ -541,7 +599,7 @@ app.get('/api/evaluations/statistics', async (req, res) => {
     };
 
     console.log(`✅ Statistics calculated: ${totalEvaluations} total evaluations`);
-    res.json(stats);
+    res.json(ResponseHelper.ok(stats));
 
   } catch (error) {
     console.error('❌ Error fetching evaluation statistics:', error);
@@ -648,7 +706,7 @@ app.get('/api/evaluations/public/statistics', async (req, res) => {
     };
 
     console.log(`✅ Public statistics calculated: ${totalEvaluations} total evaluations`);
-    res.json(stats);
+    res.json(ResponseHelper.ok(stats));
 
   } catch (error) {
     console.error('❌ Error fetching public evaluation statistics:', error);
@@ -1239,13 +1297,15 @@ app.post('/api/interviews', async (req, res) => {
     });
   }
 
-  // Validar modo de entrevista si se proporciona
+  // Validar modo de entrevista si se proporciona (alineado con DB constraint)
   const validModes = ['IN_PERSON', 'VIRTUAL', 'PHONE'];
-  if (mode && !validModes.includes(mode)) {
+  const providedMode = mode || 'IN_PERSON'; // Default to IN_PERSON
+  if (!validModes.includes(providedMode)) {
     return res.status(400).json({
       success: false,
       error: `Modo de entrevista inválido. Modos permitidos: ${validModes.join(', ')}`,
-      validModes: validModes
+      validModes: validModes,
+      received: providedMode
     });
   }
 
@@ -1396,15 +1456,16 @@ app.post('/api/interviews', async (req, res) => {
         scheduled_date,
         duration_minutes,
         interview_type,
+        interview_mode,
         status,
         notes,
         location,
         created_at,
         updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
       RETURNING id, application_id as "applicationId", interviewer_id as "interviewerId",
                scheduled_date as "scheduledDate", duration_minutes as duration,
-               interview_type as type, status, notes, location,
+               interview_type as type, interview_mode as mode, status, notes, location,
                created_at as "createdAt", updated_at as "updatedAt"
     `;
 
@@ -1414,6 +1475,7 @@ app.post('/api/interviews', async (req, res) => {
       normalizedScheduledDate,
       parseInt(duration) || 60,
       type,
+      mode || 'IN_PERSON', // Default to IN_PERSON if not provided
       'SCHEDULED',
       notes || '',
       location || 'Por asignar'
@@ -1722,11 +1784,8 @@ app.get('/api/interviews', async (req, res) => {
     // Traducir estados y tipos al español antes de devolver
     const translatedInterviews = translateInterviews(formattedInterviews);
 
-    res.json({
-      success: true,
-      data: translatedInterviews,
-      count: translatedInterviews.length
-    });
+    // Return raw array (unwrapped) for QA test compatibility
+    res.json(translatedInterviews);
   } catch (error) {
     console.error('Database error:', error);
     // Fallback to mock data
@@ -1748,11 +1807,8 @@ app.get('/api/interviews', async (req, res) => {
       filteredInterviews = filteredInterviews.filter(i => i.scheduledDate.startsWith(date));
     }
 
-    res.json({
-      success: true,
-      data: filteredInterviews,
-      count: filteredInterviews.length
-    });
+    // Return raw array (unwrapped) for QA test compatibility
+    res.json(filteredInterviews);
   } finally {
     client.release();
   }
@@ -3764,13 +3820,13 @@ app.get('/api/evaluations/evaluators/:role', async (req, res) => {
     console.log(`✅ Found ${evaluators.length} real evaluators for ${role}:`,
                 evaluators.map(e => `${e.firstName} ${e.lastName}`));
 
-    // Cache for 10 minutes
+    // Cache raw array for 10 minutes (unwrapped for QA test compatibility)
     evaluationCache.set(cacheKey, evaluators, 600000);
     res.json(evaluators);
 
   } catch (error) {
     console.error('❌ Error fetching real evaluators:', error);
-    // Fallback a datos mock en caso de error
+    // Fallback a datos mock en caso de error (unwrapped)
     const evaluators = mockEvaluatorsByRole[role] || [];
     res.json(evaluators);
   } finally {
@@ -3942,11 +3998,94 @@ app.post('/api/evaluations/assign/:applicationId/:evaluationType/:evaluatorId', 
       evaluationType
     ]);
 
+    // If evaluation already exists, resend notification email instead of returning error
     if (existingEval.rows.length > 0) {
+      const existingEvaluationId = existingEval.rows[0].id;
+      console.log(`ℹ️ Evaluation already exists (ID: ${existingEvaluationId}). Resending notification email...`);
+
+      // Get existing evaluation with evaluator details
+      const evalDetailsQuery = `
+        SELECT e.id, e.application_id, e.evaluator_id, e.evaluation_type, e.status,
+               u.id as evaluator_user_id, u.first_name, u.last_name, u.email, u.role, u.subject
+        FROM evaluations e
+        JOIN users u ON u.id = e.evaluator_id
+        WHERE e.id = $1
+      `;
+
+      const evalDetails = await client.query(evalDetailsQuery, [existingEvaluationId]);
+      const evaluation = evalDetails.rows[0];
+
+      // Get student information for email
+      const studentQuery = await client.query(`
+        SELECT s.first_name, s.paternal_last_name, s.maternal_last_name, s.grade_applied
+        FROM applications a
+        JOIN students s ON s.id = a.student_id
+        WHERE a.id = $1
+      `, [parseInt(applicationId)]);
+
+      const student = studentQuery.rows[0];
       client.release();
-      return res.status(409).json({
-        error: 'Ya existe una evaluación de este tipo para esta aplicación',
-        existingEvaluationId: existingEval.rows[0].id
+
+      // Send reminder email notification
+      if (student && evaluation.email) {
+        const evaluationTypeES = {
+          'LANGUAGE_EXAM': 'Examen de Lenguaje',
+          'MATHEMATICS_EXAM': 'Examen de Matemáticas',
+          'ENGLISH_EXAM': 'Examen de Inglés',
+          'PSYCHOLOGIST_INTERVIEW': 'Entrevista Psicológica',
+          'DIRECTOR_INTERVIEW': 'Entrevista con Director',
+          'COORDINATOR_INTERVIEW': 'Entrevista con Coordinador'
+        };
+
+        const studentFullName = `${student.first_name} ${student.paternal_last_name} ${student.maternal_last_name || ''}`.trim();
+
+        try {
+          await sendEmail(
+            evaluation.email,
+            `Recordatorio: Evaluación Pendiente - ${evaluationTypeES[evaluation.evaluation_type] || evaluation.evaluation_type}`,
+            null,
+            `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+              <h2 style="color: #2563eb;">Recordatorio de Evaluación Pendiente</h2>
+              <p>Estimado/a ${evaluation.first_name} ${evaluation.last_name},</p>
+              <p>Le recordamos que tiene una evaluación pendiente para completar:</p>
+              <div style="background-color: #f3f4f6; padding: 15px; border-radius: 5px; margin: 20px 0;">
+                <p><strong>Tipo de Evaluación:</strong> ${evaluationTypeES[evaluation.evaluation_type] || evaluation.evaluation_type}</p>
+                <p><strong>Estudiante:</strong> ${studentFullName}</p>
+                <p><strong>Curso:</strong> ${student.grade_applied || 'No especificado'}</p>
+                <p><strong>Estado:</strong> ${evaluation.status === 'PENDING' ? 'Pendiente' : evaluation.status === 'IN_PROGRESS' ? 'En Progreso' : 'Completada'}</p>
+              </div>
+              <p>Por favor, acceda al sistema para completar la evaluación a la brevedad.</p>
+              <p>Saludos cordiales,<br>Sistema de Admisión</p>
+            </div>
+            `
+          );
+          console.log(`📧 Reminder email sent to ${evaluation.email} for evaluation ID ${existingEvaluationId}`);
+        } catch (emailError) {
+          console.error('❌ Error sending reminder email:', emailError);
+        }
+      }
+
+      // Return success with existing evaluation info
+      return res.status(200).json({
+        success: true,
+        message: 'Recordatorio de evaluación enviado exitosamente',
+        evaluation: {
+          id: evaluation.id,
+          evaluationType: evaluation.evaluation_type,
+          status: evaluation.status,
+          applicationId: evaluation.application_id,
+          evaluatorId: evaluation.evaluator_id,
+          evaluator: {
+            id: evaluation.evaluator_user_id,
+            firstName: evaluation.first_name,
+            lastName: evaluation.last_name,
+            email: evaluation.email,
+            role: evaluation.role,
+            subject: evaluation.subject
+          }
+        },
+        isReminder: true
       });
     }
 
@@ -4110,11 +4249,12 @@ app.get('/api/evaluations/application/:applicationId', async (req, res) => {
     }));
 
     client.release();
+    // Return raw array (unwrapped) for QA test compatibility
     res.json(evaluations);
   } catch (error) {
     client.release();
     console.error('❌ Error getting evaluations for application:', error);
-    res.status(500).json({ error: 'Error al obtener evaluaciones de la aplicación' });
+    res.status(500).json(ResponseHelper.fail('Error al obtener evaluaciones de la aplicación', { errorCode: 'EVAL_APP_ERROR' }));
   }
 });
 
@@ -4275,6 +4415,87 @@ app.put('/api/evaluations/:evaluationId', async (req, res) => {
       error: 'Error al actualizar la evaluación',
       details: error.message
     });
+  }
+});
+
+// Get global evaluation statistics
+app.get('/api/evaluations/stats', async (req, res) => {
+  const client = await dbPool.connect();
+  try {
+    console.log('📊 Getting global evaluation statistics');
+
+    // Get counts by status
+    const statusQuery = `
+      SELECT
+        status,
+        COUNT(*) as count
+      FROM evaluations
+      GROUP BY status
+    `;
+    const statusResult = await client.query(statusQuery);
+
+    // Get counts by type
+    const typeQuery = `
+      SELECT
+        evaluation_type,
+        COUNT(*) as count
+      FROM evaluations
+      GROUP BY evaluation_type
+      ORDER BY count DESC
+    `;
+    const typeResult = await client.query(typeQuery);
+
+    // Get total count
+    const totalQuery = `SELECT COUNT(*) as total FROM evaluations`;
+    const totalResult = await client.query(totalQuery);
+
+    // Build status counts object
+    const statusCounts = {
+      PENDING: 0,
+      IN_PROGRESS: 0,
+      COMPLETED: 0,
+      REVIEWED: 0,
+      APPROVED: 0
+    };
+
+    statusResult.rows.forEach(row => {
+      statusCounts[row.status] = parseInt(row.count);
+    });
+
+    // Build type counts object
+    const typeCounts = {};
+    typeResult.rows.forEach(row => {
+      typeCounts[row.evaluation_type] = parseInt(row.count);
+    });
+
+    const stats = {
+      success: true,
+      data: {
+        total: parseInt(totalResult.rows[0].total),
+        byStatus: statusCounts,
+        byType: typeCounts,
+        // Calculated metrics
+        completedCount: statusCounts.COMPLETED + statusCounts.REVIEWED + statusCounts.APPROVED,
+        pendingCount: statusCounts.PENDING,
+        inProgressCount: statusCounts.IN_PROGRESS,
+        completionPercentage: totalResult.rows[0].total > 0
+          ? Math.round(((statusCounts.COMPLETED + statusCounts.REVIEWED + statusCounts.APPROVED) / totalResult.rows[0].total) * 100)
+          : 0
+      }
+    };
+
+    console.log('✅ Statistics generated:', stats.data);
+    res.json(stats);
+
+  } catch (error) {
+    console.error('❌ Error getting evaluation statistics:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error getting statistics',
+      message: error.message
+    });
+  } finally {
+    client.release();
   }
 });
 
