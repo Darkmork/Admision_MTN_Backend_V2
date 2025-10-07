@@ -1,0 +1,56 @@
+%%{init: {'theme':'base', 'themeVariables': { 'primaryColor':'#4CAF50','primaryTextColor':'#fff','primaryBorderColor':'#388E3C','lineColor':'#2196F3','secondaryColor':'#FFC107','tertiaryColor':'#F44336'}}}%%
+
+graph TB
+    %% Estilos
+    classDef successStyle fill:#4CAF50,stroke:#388E3C,stroke-width:2px,color:#fff
+    classDef apiStyle fill:#2196F3,stroke:#1976D2,stroke-width:2px,color:#fff
+    classDef userStyle fill:#FFC107,stroke:#FFA000,stroke-width:2px,color:#000
+    classDef processStyle fill:#9C27B0,stroke:#7B1FA2,stroke-width:2px,color:#fff
+
+    %% ========== FASE 1: AUTENTICACIÓN ==========
+    START([Apoderado Inicia Proceso]):::userStyle
+    START --> EMAIL[Recibe Email de Invitación]:::userStyle
+    EMAIL --> VERIFY[Verificar Email y RUT<br/>POST /api/email/verify-email]:::apiStyle
+    VERIFY --> REGISTER[Registrar Cuenta<br/>POST /api/auth/register]:::apiStyle
+    REGISTER --> LOGIN[Login<br/>POST /api/auth/login]:::apiStyle
+    LOGIN --> DASHBOARD1[Acceso al Dashboard]:::successStyle
+
+    %% ========== FASE 2: POSTULACIÓN ==========
+    DASHBOARD1 --> FORMSTART[Iniciar Formulario de Postulación]:::userStyle
+    FORMSTART --> STEP1[Paso 1: Info del Estudiante]:::processStyle
+    STEP1 --> STEP2[Paso 2: Info del Padre]:::processStyle
+    STEP2 --> STEP3[Paso 3: Info de la Madre]:::processStyle
+    STEP3 --> STEP4[Paso 4: Info del Apoderado]:::processStyle
+    STEP4 --> STEP5[Paso 5: Info Médica]:::processStyle
+    STEP5 --> STEP6[Paso 6: Info Académica]:::processStyle
+    STEP6 --> DOCS[Cargar Documentos<br/>POST /api/applications/documents]:::apiStyle
+    DOCS --> REVIEW[Revisar Postulación]:::userStyle
+    REVIEW --> SUBMIT[Enviar Postulación<br/>POST /api/applications]:::apiStyle
+    SUBMIT --> CONFIRM[Confirmación por Email]:::successStyle
+
+    %% ========== FASE 3: DASHBOARD ==========
+    CONFIRM --> DASHBOARD2[Dashboard Familiar]:::successStyle
+    DASHBOARD2 --> VIEWAPP[Ver Estado de Postulación]:::userStyle
+    VIEWAPP --> VIEWDOCS[Ver/Descargar Documentos]:::userStyle
+    VIEWDOCS --> CALENDAR[Ver Calendario de Entrevistas]:::userStyle
+    CALENDAR --> NOTIF[Ver Notificaciones]:::userStyle
+
+    %% ========== FASE 4: ENTREVISTA ==========
+    NOTIF --> INTERVIEW[Recibir Invitación a Entrevista]:::apiStyle
+    INTERVIEW --> SCHEDULE[Confirmar Horario de Entrevista]:::userStyle
+    SCHEDULE --> REMINDER[Recibir Recordatorio 24h antes]:::apiStyle
+    REMINDER --> ATTEND[Asistir a Entrevista]:::userStyle
+    ATTEND --> COMPLETE[Entrevista Completada]:::successStyle
+
+    %% ========== FASE 5: DECISIÓN ==========
+    COMPLETE --> DECISION[Admin Toma Decisión<br/>PATCH /api/applications/:id/status]:::apiStyle
+    DECISION --> NOTIFY[Notificación de Decisión]:::apiStyle
+    NOTIFY --> RESULT{Resultado}
+    RESULT -->|Aprobado| APPROVED[Aceptado - Instrucciones de Matrícula]:::successStyle
+    RESULT -->|Lista de Espera| WAITLIST[Lista de Espera - Posición]:::processStyle
+    RESULT -->|Rechazado| REJECTED[Rechazado - Información]:::processStyle
+
+    %% ========== FIN ==========
+    APPROVED --> END([Proceso Completo]):::successStyle
+    WAITLIST --> END
+    REJECTED --> END

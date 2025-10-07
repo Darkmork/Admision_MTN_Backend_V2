@@ -1,0 +1,205 @@
+version: "prometheus/v1"
+service: "messaging-queues"
+labels:
+  team: "platform"
+  environment: "production"
+  component: "messaging"
+  
+slos:
+  # Dead Letter Queue Zero Messages SLO - 100% uptime (no messages in DLQ)
+  - name: "dlq-zero-messages"
+    objective: 100
+    description: "Dead Letter Queues should always be empty (zero messages)"
+    sli:
+      raw:
+        error_query: sum(rabbitmq_queue_messages_ready{queue=~".*dlq.*|.*dead.*"})
+        total_query: vector(1)
+    alerting:
+      name: DLQZeroMessages
+      labels:
+        category: messaging
+        component: dlq
+      annotations:
+        summary: "Dead Letter Queue contains messages"
+        runbook: "https://runbooks.mtn.cl/slo/dlq-zero-messages"
+      page_alert:
+        labels:
+          severity: page
+          team: platform
+        annotations:
+          summary: "DLQ violation - messages in dead letter queue"
+          description: "Dead letter queue contains messages that failed processing"
+          impact: "Critical business events (applications, evaluations, notifications) may be lost"
+          action: "IMMEDIATE: Analyze DLQ messages, identify root cause, reprocess valid messages"
+      ticket_alert:
+        labels:
+          severity: ticket
+          team: platform
+        annotations:
+          summary: "DLQ monitoring - investigate message failures"
+
+  # Queue Backlog SLO - Admission Queue should not exceed 1000 messages
+  - name: "admission-queue-backlog"
+    objective: 99.9
+    description: "Admission queue backlog should not exceed 1000 messages 99.9% of the time"
+    sli:
+      raw:
+        error_query: clamp_max(rabbitmq_queue_messages_ready{queue="admissions"} - 1000, inf)
+        total_query: vector(1)
+    alerting:
+      name: AdmissionQueueBacklog
+      labels:
+        category: messaging
+        component: admission_queue
+      annotations:
+        summary: "Admission queue backlog exceeded threshold"
+        runbook: "https://runbooks.mtn.cl/slo/admission-queue-backlog"
+      page_alert:
+        labels:
+          severity: page
+          team: platform
+        annotations:
+          summary: "Admission queue backlog >1000 messages"
+          description: "Admission processing queue has excessive backlog"
+          impact: "Application processing delays, families may experience slow response times"
+          action: "Scale admission processors, check database performance, verify worker health"
+      ticket_alert:
+        labels:
+          severity: ticket
+          team: platform
+        annotations:
+          summary: "Admission queue backlog trending high"
+
+  # Evaluation Queue Backlog SLO - Should not exceed 500 messages
+  - name: "evaluation-queue-backlog"
+    objective: 99.9
+    description: "Evaluation queue backlog should not exceed 500 messages 99.9% of the time"
+    sli:
+      raw:
+        error_query: clamp_max(rabbitmq_queue_messages_ready{queue="evaluations"} - 500, inf)
+        total_query: vector(1)
+    alerting:
+      name: EvaluationQueueBacklog
+      labels:
+        category: messaging
+        component: evaluation_queue
+      annotations:
+        summary: "Evaluation queue backlog exceeded threshold"
+        runbook: "https://runbooks.mtn.cl/slo/evaluation-queue-backlog"
+      page_alert:
+        labels:
+          severity: page
+          team: platform
+        annotations:
+          summary: "Evaluation queue backlog >500 messages"
+          description: "Evaluation processing queue has excessive backlog"
+          impact: "Evaluation workflow delays, teachers may not receive timely evaluation requests"
+          action: "Scale evaluation processors, check database locks, verify evaluation service health"
+      ticket_alert:
+        labels:
+          severity: ticket
+          team: platform
+        annotations:
+          summary: "Evaluation queue backlog trending high"
+
+  # Notification Queue Backlog SLO - Should not exceed 2000 messages
+  - name: "notification-queue-backlog"
+    objective: 99.5
+    description: "Notification queue backlog should not exceed 2000 messages 99.5% of the time"
+    sli:
+      raw:
+        error_query: clamp_max(rabbitmq_queue_messages_ready{queue="notifications"} - 2000, inf)
+        total_query: vector(1)
+    alerting:
+      name: NotificationQueueBacklog
+      labels:
+        category: messaging
+        component: notification_queue
+      annotations:
+        summary: "Notification queue backlog exceeded threshold"
+        runbook: "https://runbooks.mtn.cl/slo/notification-queue-backlog"
+      page_alert:
+        labels:
+          severity: page
+          team: platform
+        annotations:
+          summary: "Notification queue backlog >2000 messages"
+          description: "Notification processing queue has excessive backlog"
+          impact: "Email notification delays, families may not receive timely updates"
+          action: "Scale notification processors, check SMTP service, verify email template processing"
+      ticket_alert:
+        labels:
+          severity: ticket
+          team: platform
+        annotations:
+          summary: "Notification queue backlog trending high"
+
+  # Message Processing Success Rate SLO - 99% of messages should be processed successfully
+  - name: "message-processing-success"
+    objective: 99
+    description: "99% of RabbitMQ messages should be processed successfully (not requeued)"
+    sli:
+      events:
+        error_query: sum(rate(rabbitmq_queue_messages_redelivered_total[5m]))
+        total_query: sum(rate(rabbitmq_queue_messages_delivered_total[5m]))
+    alerting:
+      name: MessageProcessingSuccess
+      labels:
+        category: messaging
+        component: message_processing
+      annotations:
+        summary: "Message processing success rate SLO violation"
+        runbook: "https://runbooks.mtn.cl/slo/message-processing-success"
+      page_alert:
+        labels:
+          severity: page
+          team: platform
+        annotations:
+          summary: "High message redelivery rate detected"
+          description: "Messages are being redelivered at high rate indicating processing failures"
+          impact: "Duplicate processing risk, potential data consistency issues"
+          action: "Analyze consumer errors, check database connectivity, review message processing logic"
+      ticket_alert:
+        labels:
+          severity: ticket
+          team: platform
+        annotations:
+          summary: "Message processing success rate degrading"
+
+  # Queue Consumer Health SLO - 99% of queues should have active consumers
+  - name: "queue-consumer-health"
+    objective: 99
+    description: "99% of critical queues should have at least one active consumer"
+    sli:
+      raw:
+        error_query: |
+          count by (queue) (
+            rabbitmq_queue_consumers{queue=~"admissions|evaluations|notifications"} == 0
+          )
+        total_query: |
+          count by (queue) (
+            rabbitmq_queue_consumers{queue=~"admissions|evaluations|notifications"}
+          )
+    alerting:
+      name: QueueConsumerHealth
+      labels:
+        category: messaging
+        component: consumers
+      annotations:
+        summary: "Queue consumer health SLO violation"
+        runbook: "https://runbooks.mtn.cl/slo/queue-consumer-health"
+      page_alert:
+        labels:
+          severity: page
+          team: platform
+        annotations:
+          summary: "Critical queue has no active consumers"
+          description: "Queue {{ $labels.queue }} has no active consumers"
+          impact: "Messages will accumulate and not be processed"
+          action: "IMMEDIATE: Restart consumer services, check service health, verify consumer registration"
+      ticket_alert:
+        labels:
+          severity: ticket
+          team: platform
+        annotations:
+          summary: "Queue consumer health degrading"

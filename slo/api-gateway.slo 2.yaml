@@ -1,0 +1,102 @@
+version: "prometheus/v1"
+service: "api-gateway"
+labels:
+  team: "sre"
+  environment: "production"
+  
+slos:
+  # Latency SLO - 99% of requests should complete in <2s
+  - name: "requests-latency"
+    objective: 99
+    description: "99% of HTTP requests should complete in less than 2 seconds"
+    sli:
+      events:
+        error_query: sum(rate(http_server_requests_seconds_count{app="api-gateway", le="2"}[5m]))
+        total_query: sum(rate(http_server_requests_seconds_count{app="api-gateway"}[5m]))
+    alerting:
+      name: ApiGatewayLatency
+      labels:
+        category: latency
+        service: api-gateway
+      annotations:
+        summary: "API Gateway latency SLO violation"
+        runbook: "https://runbooks.mtn.cl/slo/api-gateway-latency"
+      page_alert:
+        labels:
+          severity: page
+          team: sre
+        annotations:
+          summary: "API Gateway latency SLO burn rate is too fast"
+          description: "API Gateway is burning through its latency error budget too fast"
+          impact: "Users experiencing slow response times"
+          action: "Check gateway CPU/memory usage, review upstream service health"
+      ticket_alert:
+        labels:
+          severity: ticket  
+          team: sre
+        annotations:
+          summary: "API Gateway latency SLO burn rate requires attention"
+          description: "API Gateway latency trending towards SLO violation"
+
+  # Availability SLO - 95% of requests should be successful (non-5xx)
+  - name: "requests-availability"
+    objective: 95
+    description: "95% of HTTP requests should be successful (status code <500)"
+    sli:
+      events:
+        error_query: sum(rate(http_server_requests_seconds_count{app="api-gateway",status=~"5.."}[5m]))
+        total_query: sum(rate(http_server_requests_seconds_count{app="api-gateway"}[5m]))
+    alerting:
+      name: ApiGatewayAvailability
+      labels:
+        category: availability
+        service: api-gateway
+      annotations:
+        summary: "API Gateway availability SLO violation"
+        runbook: "https://runbooks.mtn.cl/slo/api-gateway-availability"
+      page_alert:
+        labels:
+          severity: page
+          team: sre
+        annotations:
+          summary: "API Gateway availability SLO burn rate is critical"
+          description: "API Gateway is experiencing high error rates"
+          impact: "Users cannot access the admission system"
+          action: "Immediate investigation required - check logs, upstream services, consider rollback"
+      ticket_alert:
+        labels:
+          severity: ticket
+          team: sre  
+        annotations:
+          summary: "API Gateway availability SLO requires investigation"
+          description: "API Gateway error rate trending upward"
+
+  # Throughput SLO - System should handle baseline load
+  - name: "requests-throughput"
+    objective: 99.9
+    description: "System should maintain >100 RPS baseline throughput"
+    sli:
+      raw:
+        error_query: |
+          (
+            clamp_max(
+              100 - sum(rate(http_server_requests_seconds_count{app="api-gateway"}[5m])),
+              100
+            )
+          )
+        total_query: vector(100)
+    alerting:
+      name: ApiGatewayThroughput
+      labels:
+        category: throughput
+        service: api-gateway
+      annotations:
+        summary: "API Gateway throughput below baseline"
+        runbook: "https://runbooks.mtn.cl/slo/api-gateway-throughput"
+      ticket_alert:
+        labels:
+          severity: ticket
+          team: sre
+        annotations:
+          summary: "API Gateway throughput below expected baseline"
+          description: "Gateway receiving less traffic than expected baseline"

@@ -499,35 +499,7 @@ app.use(compression({
   level: 6
 }));
 
-// Input validation helpers
-const validateRUT = (rut) => {
-  if (!rut || typeof rut !== 'string') return false;
-  
-  // Clean RUT - remove dots, spaces and hyphen
-  const cleanRUT = rut.replace(/\./g, '').replace(/\s/g, '').replace('-', '');
-  
-  // Check basic format (7-8 digits + 1 check digit)
-  if (!/^\d{7,8}[0-9Kk]$/.test(cleanRUT)) return false;
-  
-  // Extract number and check digit
-  const rutNumber = cleanRUT.slice(0, -1);
-  const checkDigit = cleanRUT.slice(-1).toUpperCase();
-  
-  // Calculate check digit
-  let sum = 0;
-  let multiplier = 2;
-  
-  for (let i = rutNumber.length - 1; i >= 0; i--) {
-    sum += parseInt(rutNumber[i]) * multiplier;
-    multiplier = multiplier === 7 ? 2 : multiplier + 1;
-  }
-  
-  const remainder = sum % 11;
-  const calculatedCheckDigit = remainder === 0 ? '0' : remainder === 1 ? 'K' : (11 - remainder).toString();
-  
-  return checkDigit === calculatedCheckDigit;
-};
-
+// Input validation helpers (validateRUT imported from utils/validateRUT.js)
 const validateEmail = (email) => {
   if (!email || typeof email !== 'string') return false;
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -709,17 +681,31 @@ app.get('/health', (req, res) => {
 app.get('/api/applications', async (req, res) => {
   const client = await dbPool.connect();
   try {
-    // Extract pagination parameters
+    // Extract pagination and filter parameters
     const pageNum = parseInt(req.query.page) || 0;
     const limit = parseInt(req.query.limit) || 20;
     const offset = pageNum * limit;
+    const statusFilter = req.query.status; // Extract status filter
 
-    // Query to count total applications (exclude soft-deleted)
-    const countQuery = `SELECT COUNT(*) as total FROM applications WHERE deleted_at IS NULL`;
-    const countResult = await queryWithCircuitBreaker.fire(client, countQuery, []);
+    // Build WHERE conditions
+    const whereConditions = ['a.deleted_at IS NULL'];
+    const queryParams = [];
+    let paramIndex = 1;
+
+    if (statusFilter) {
+      whereConditions.push(`a.status = $${paramIndex}`);
+      queryParams.push(statusFilter);
+      paramIndex++;
+    }
+
+    const whereClause = whereConditions.join(' AND ');
+
+    // Query to count total applications with filters
+    const countQuery = `SELECT COUNT(*) as total FROM applications a WHERE ${whereClause}`;
+    const countResult = await queryWithCircuitBreaker.fire(client, countQuery, queryParams);
     const total = parseInt(countResult.rows[0].total);
 
-    // Query to get applications with student, parent and evaluation details
+    // Query to get applications with student, parent, guardian and evaluation details
     const query = `
       SELECT
         a.id,
@@ -754,6 +740,20 @@ app.get('/api/applications', async (req, res) => {
         m.phone as mother_phone,
         m.profession as mother_profession,
 
+        -- Guardian information (Contacto Principal / Apoderado)
+        g.id as guardian_id,
+        g.full_name as guardian_name,
+        g.email as guardian_email,
+        g.phone as guardian_phone,
+        g.relationship as guardian_relationship,
+        g.rut as guardian_rut,
+
+        -- Applicant User information (Usuario que creó la postulación)
+        u.id as applicant_user_id,
+        u.first_name as applicant_first_name,
+        u.last_name as applicant_last_name,
+        u.email as applicant_email,
+
         -- Count evaluations
         (SELECT COUNT(*) FROM evaluations e WHERE e.application_id = a.id) as total_evaluations,
         (SELECT COUNT(*) FROM evaluations e WHERE e.application_id = a.id AND e.status = 'COMPLETED') as completed_evaluations,
@@ -766,22 +766,122 @@ app.get('/api/applications', async (req, res) => {
       LEFT JOIN students s ON s.id = a.student_id
       LEFT JOIN parents f ON f.id = a.father_id AND f.parent_type = 'FATHER'
       LEFT JOIN parents m ON m.id = a.mother_id AND m.parent_type = 'MOTHER'
-      WHERE a.deleted_at IS NULL
+      LEFT JOIN guardians g ON g.id = a.guardian_id
+      LEFT JOIN users u ON u.id = a.applicant_user_id
+      WHERE ${whereClause}
       ORDER BY a.created_at DESC
-      LIMIT $1 OFFSET $2
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `;
 
-    const result = await queryWithCircuitBreaker.fire(client, query, [limit, offset]);
-    
+    // Add pagination parameters to the query params array
+    const fullQueryParams = [...queryParams, limit, offset];
+    const result = await queryWithCircuitBreaker.fire(client, query, fullQueryParams);
+
+    // Fetch evaluations and interviews for all applications
+    const applicationIds = result.rows.map(row => row.id);
+
+    let evaluationsMap = {};
+    let interviewsMap = {};
+
+    if (applicationIds.length > 0) {
+      // Fetch evaluations
+      const evaluationsQuery = `
+        SELECT
+          e.id,
+          e.application_id,
+          e.evaluation_type,
+          e.status,
+          e.score,
+          e.max_score,
+          e.observations,
+          e.evaluation_date,
+          e.created_at,
+          u.id as evaluator_id,
+          u.first_name as evaluator_first_name,
+          u.last_name as evaluator_last_name
+        FROM evaluations e
+        LEFT JOIN users u ON u.id = e.evaluator_id
+        WHERE e.application_id = ANY($1)
+        ORDER BY e.created_at DESC
+      `;
+
+      const evaluationsResult = await client.query(evaluationsQuery, [applicationIds]);
+
+      evaluationsResult.rows.forEach(evalRow => {
+        if (!evaluationsMap[evalRow.application_id]) {
+          evaluationsMap[evalRow.application_id] = [];
+        }
+        evaluationsMap[evalRow.application_id].push({
+          id: evalRow.id,
+          evaluationType: evalRow.evaluation_type,
+          status: evalRow.status,
+          score: evalRow.score,
+          maxScore: evalRow.max_score,
+          observations: evalRow.observations,
+          evaluationDate: evalRow.evaluation_date,
+          createdAt: evalRow.created_at,
+          evaluator: evalRow.evaluator_id ? {
+            id: evalRow.evaluator_id,
+            firstName: evalRow.evaluator_first_name,
+            lastName: evalRow.evaluator_last_name
+          } : null
+        });
+      });
+
+      // Fetch interviews
+      const interviewsQuery = `
+        SELECT
+          i.id,
+          i.application_id,
+          i.interview_type,
+          i.status,
+          i.scheduled_date,
+          i.duration_minutes,
+          i.location,
+          i.notes,
+          i.created_at,
+          u.id as interviewer_id,
+          u.first_name as interviewer_first_name,
+          u.last_name as interviewer_last_name
+        FROM interviews i
+        LEFT JOIN users u ON u.id = i.interviewer_id
+        WHERE i.application_id = ANY($1)
+        ORDER BY i.scheduled_date DESC
+      `;
+
+      const interviewsResult = await client.query(interviewsQuery, [applicationIds]);
+
+      interviewsResult.rows.forEach(intRow => {
+        if (!interviewsMap[intRow.application_id]) {
+          interviewsMap[intRow.application_id] = [];
+        }
+        interviewsMap[intRow.application_id].push({
+          id: intRow.id,
+          interviewType: intRow.interview_type,
+          status: intRow.status,
+          scheduledDate: intRow.scheduled_date,
+          durationMinutes: intRow.duration_minutes,
+          location: intRow.location,
+          notes: intRow.notes,
+          createdAt: intRow.created_at,
+          interviewer: intRow.interviewer_id ? {
+            id: intRow.interviewer_id,
+            firstName: intRow.interviewer_first_name,
+            lastName: intRow.interviewer_last_name
+          } : null
+        });
+      });
+    }
+
     // Transform the data to the expected format
     const applications = result.rows.map(row => ({
       id: row.id,
-      status: row.status,
+      status: translateToSpanish(row.status, 'application_status'),
       submissionDate: row.submission_date,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       additionalNotes: row.additional_notes,
-      
+
       // Progress information
       progress: {
         totalEvaluations: parseInt(row.total_evaluations),
@@ -796,7 +896,9 @@ app.get('/api/applications', async (req, res) => {
         id: row.student_id,
         fullName: `${row.student_first_name} ${row.student_paternal_last_name} ${row.student_maternal_last_name || ''}`.trim(),
         firstName: row.student_first_name,
-        lastName: `${row.student_paternal_last_name} ${row.student_maternal_last_name || ''}`.trim(),
+        lastName: `${row.student_paternal_last_name} ${row.student_maternal_last_name || ''}`.trim(), // Apellido completo para compatibilidad
+        paternalLastName: row.student_paternal_last_name,
+        maternalLastName: row.student_maternal_last_name || '',
         rut: row.student_rut,
         birthDate: row.student_birth_date,
         gradeApplied: row.student_grade,
@@ -819,7 +921,31 @@ app.get('/api/applications', async (req, res) => {
         email: row.mother_email,
         phone: row.mother_phone,
         profession: row.mother_profession
-      } : null
+      } : null,
+
+      // Guardian (Contacto Principal / Apoderado)
+      guardian: row.guardian_id ? {
+        id: row.guardian_id,
+        fullName: row.guardian_name,
+        email: row.guardian_email,
+        phone: row.guardian_phone,
+        relationship: row.guardian_relationship,
+        rut: row.guardian_rut
+      } : null,
+
+      // Applicant User (Usuario que creó la postulación)
+      applicantUser: row.applicant_user_id ? {
+        id: row.applicant_user_id,
+        firstName: row.applicant_first_name,
+        lastName: row.applicant_last_name,
+        email: row.applicant_email
+      } : null,
+
+      // Evaluations for this application
+      evaluations: evaluationsMap[row.id] || [],
+
+      // Interviews for this application
+      interviews: interviewsMap[row.id] || []
     }));
 
     // Traducir estados de applications al español
@@ -1110,7 +1236,9 @@ app.get('/api/applications/search', async (req, res) => {
         id: row.student_id,
         fullName: `${row.student_first_name} ${row.student_paternal_last_name} ${row.student_maternal_last_name || ''}`.trim(),
         firstName: row.student_first_name,
-        lastName: `${row.student_paternal_last_name} ${row.student_maternal_last_name || ''}`.trim(),
+        lastName: `${row.student_paternal_last_name} ${row.student_maternal_last_name || ''}`.trim(), // Apellido completo para compatibilidad
+        paternalLastName: row.student_paternal_last_name,
+        maternalLastName: row.student_maternal_last_name || '',
         rut: row.student_rut,
         birthDate: row.student_birth_date,
         gradeApplied: row.student_grade,
@@ -1315,7 +1443,7 @@ app.get('/api/applications/public/all', async (req, res) => {
         s.current_school
       FROM applications a
       JOIN students s ON s.id = a.student_id
-      WHERE a.status IN ('APPROVED', 'COMPLETED', 'UNDER_REVIEW')
+      WHERE a.deleted_at IS NULL
       ORDER BY a.created_at DESC
       LIMIT 50
     `);
@@ -1324,7 +1452,7 @@ app.get('/api/applications/public/all', async (req, res) => {
       id: row.id,
       studentName: `${row.first_name} ${row.paternal_last_name}`,
       grade: row.grade_applied,
-      status: row.status,
+      status: translateToSpanish(row.status, 'application_status'),
       currentSchool: row.current_school || 'No especificado',
       createdAt: row.created_at,
       updatedAt: row.updated_at

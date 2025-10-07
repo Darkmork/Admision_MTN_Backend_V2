@@ -51,6 +51,64 @@ externalServiceBreaker.fallback(() => {
   throw new Error('Email service temporarily unavailable - circuit breaker open');
 });
 
+// ============= STANDARDIZED RESPONSE HELPERS =============
+/**
+ * Standardized response wrapper for all API responses
+ * Ensures consistent contract with frontend
+ */
+const ResponseHelper = {
+  /**
+   * Success response for single entity
+   * @param {Object} data - The data to return
+   * @returns {Object} Standardized response with success, data, timestamp
+   */
+  ok(data) {
+    return {
+      success: true,
+      data: data,
+      timestamp: new Date().toISOString()
+    };
+  },
+
+  /**
+   * Success response for paginated lists
+   * @param {Array} items - Array of items
+   * @param {Object} meta - Pagination metadata {total, page, limit}
+   * @returns {Object} Standardized paginated response
+   */
+  page(items, meta) {
+    const { total, page, limit } = meta;
+    return {
+      success: true,
+      data: items,
+      total: total,
+      page: page,
+      limit: limit,
+      totalPages: Math.ceil(total / limit),
+      timestamp: new Date().toISOString()
+    };
+  },
+
+  /**
+   * Error response
+   * @param {String} error - Error message
+   * @param {Object} options - Optional {errorCode, details}
+   * @returns {Object} Standardized error response
+   */
+  fail(error, options = {}) {
+    const response = {
+      success: false,
+      error: error,
+      timestamp: new Date().toISOString()
+    };
+
+    if (options.errorCode) response.errorCode = options.errorCode;
+    if (options.details) response.details = options.details;
+
+    return response;
+  }
+};
+
 // Configurar transportador de email con Gmail
 const transporter = nodemailer.createTransport({
   service: 'gmail',
@@ -1415,12 +1473,7 @@ app.get('/api/email-templates/all', (req, res) => {
     }
   ];
 
-  res.json({
-    success: true,
-    data: mockTemplates,
-    total: mockTemplates.length,
-    message: 'Email templates retrieved successfully'
-  });
+  res.json(ResponseHelper.ok(mockTemplates));
 });
 
 // ============= NOTIFICATION CONFIGURATION ENDPOINTS =============
@@ -1456,12 +1509,7 @@ app.get('/api/notifications/config', async (req, res) => {
 
     const result = await client.query(query);
 
-    res.json({
-      success: true,
-      data: result.rows,
-      total: result.rows.length,
-      message: 'Notification configurations retrieved successfully'
-    });
+    res.json(ResponseHelper.ok(result.rows));
   } catch (error) {
     console.error('❌ Error fetching notification configs:', error);
     res.status(500).json({
