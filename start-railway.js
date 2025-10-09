@@ -236,23 +236,26 @@ console.log('⏳ Waiting for services to be healthy...\n');
       });
     });
 
-    // Proxy configuration
-    const proxyOptions = (target) => ({
+    // Proxy configuration - CRITICAL: Preserve full path including route prefix
+    const proxyOptions = (target, routePrefix) => ({
       target,
       changeOrigin: true,
       logLevel: 'silent',
       timeout: 30000,
       proxyTimeout: 30000,
       pathRewrite: (path, req) => {
-        // Keep the full path - don't strip anything
-        return path;
+        // CRITICAL FIX: Express strips the route prefix when using app.use(route, middleware)
+        // We must reconstruct the full original path by prepending the route prefix
+        const fullPath = routePrefix + path;
+        console.log(`Proxying: ${req.originalUrl} → ${target}${fullPath}`);
+        return fullPath;
       },
       onError: (err, req, res) => {
-        console.error(`Proxy error for ${req.path}:`, err.message);
+        console.error(`Proxy error for ${req.originalUrl}:`, err.message);
         res.status(502).json({
           error: 'Bad Gateway',
           message: 'Service temporarily unavailable',
-          path: req.path,
+          path: req.originalUrl,
           target
         });
       },
@@ -271,7 +274,8 @@ console.log('⏳ Waiting for services to be healthy...\n');
     services.forEach(service => {
       service.routes.forEach(route => {
         console.log(`   Mounting ${route} → http://localhost:${service.port}`);
-        app.use(route, createProxyMiddleware(proxyOptions(`http://localhost:${service.port}`)));
+        // CRITICAL: Pass the route prefix so pathRewrite can reconstruct full path
+        app.use(route, createProxyMiddleware(proxyOptions(`http://localhost:${service.port}`, route)));
       });
     });
 
