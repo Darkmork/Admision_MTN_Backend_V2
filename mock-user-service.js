@@ -165,12 +165,13 @@ function decryptCredentials(req, res, next) {
 }
 
 // Database configuration with connection pooling
+// Uses Railway environment variables with fallback to local dev values
 const dbPool = new Pool({
-  host: 'localhost',
-  port: 5432,
-  database: 'Admisión_MTN_DB',
-  user: 'admin',
-  password: 'admin123',
+  host: process.env.DB_HOST || 'localhost',
+  port: parseInt(process.env.DB_PORT || '5432'),
+  database: process.env.DB_NAME || 'Admisión_MTN_DB',
+  user: process.env.DB_USERNAME || 'admin',
+  password: process.env.DB_PASSWORD || 'admin123',
   max: 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 2000,

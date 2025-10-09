@@ -35,11 +35,11 @@ app.use(compression({
 
 // ============= DATABASE CONNECTION POOL =============
 const dbPool = new Pool({
-  host: 'localhost',
-  port: 5432,
-  database: 'Admisión_MTN_DB',
-  user: 'admin',
-  password: 'admin123',
+  host: process.env.DB_HOST || 'localhost',
+  port: parseInt(process.env.DB_PORT || '5432'),
+  database: process.env.DB_NAME || 'Admisión_MTN_DB',
+  user: process.env.DB_USERNAME || 'admin',
+  password: process.env.DB_PASSWORD || 'admin123',
   max: 20,                    // 20 connections per service
   idleTimeoutMillis: 30000,   // Close idle after 30s
   connectionTimeoutMillis: 2000, // 2s connection timeout
