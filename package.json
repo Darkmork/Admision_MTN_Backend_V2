@@ -8,7 +8,7 @@
     "test": "tests"
   },
   "scripts": {
-    "start": "node server-railway.js",
+    "start": "node start-railway.js",
     "start:microservices": "node start-railway.js",
     "start:local": "node mock-user-service.js & node mock-application-service.js & node mock-evaluation-service.js & node mock-notification-service.js & node mock-dashboard-service.js & node mock-guardian-service.js & wait",
     "test": "bash integration-tests.sh",
