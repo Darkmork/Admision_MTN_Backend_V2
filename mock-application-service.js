@@ -26,6 +26,7 @@ const dbPool = new Pool({
   database: process.env.DB_NAME || 'Admisión_MTN_DB',
   user: process.env.DB_USERNAME || 'admin',
   password: process.env.DB_PASSWORD || 'admin123',
+  ssl: false, // No SSL for Railway internal network
   max: 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 2000,
