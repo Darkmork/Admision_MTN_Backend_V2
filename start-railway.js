@@ -243,6 +243,10 @@ console.log('⏳ Waiting for services to be healthy...\n');
       logLevel: 'silent',
       timeout: 30000,
       proxyTimeout: 30000,
+      pathRewrite: (path, req) => {
+        // Keep the full path - don't strip anything
+        return path;
+      },
       onError: (err, req, res) => {
         console.error(`Proxy error for ${req.path}:`, err.message);
         res.status(502).json({
