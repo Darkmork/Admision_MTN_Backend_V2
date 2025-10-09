@@ -8,6 +8,9 @@
     "test": "tests"
   },
   "scripts": {
+    "start": "node start-railway.js",
+    "start:microservices": "node start-railway.js",
+    "start:local": "node mock-user-service.js & node mock-application-service.js & node mock-evaluation-service.js & node mock-notification-service.js & node mock-dashboard-service.js & node mock-guardian-service.js & wait",
     "test": "bash integration-tests.sh",
     "test:integration": "bash integration-tests.sh",
     "test:smoke": "curl -f http://localhost:8082/health && curl -f http://localhost:8083/health && curl -f http://localhost:8084/health && curl -f http://localhost:8085/health && curl -f http://localhost:8086/health && curl -f http://localhost:8087/health",
@@ -35,6 +38,7 @@
     "csrf-csrf": "^4.0.3",
     "express": "^5.1.0",
     "http-proxy-middleware": "^3.0.5",
+    "jsonwebtoken": "^9.0.2",
     "multer": "^2.0.2",
     "nodemailer": "^7.0.6",
     "opossum": "^9.0.0",

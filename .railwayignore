@@ -1,0 +1,15 @@
+node_modules
+.env
+.env.local
+.git
+*.log
+/tmp
+*.md
+docs/
+migrations/
+tests/
+.vscode
+.idea
+*.bak
+*~
+.DS_Store
