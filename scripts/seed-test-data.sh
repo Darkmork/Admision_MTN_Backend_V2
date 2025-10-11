@@ -22,6 +22,107 @@ echo "Database: $DB_NAME"
 echo "Host: $DB_HOST:$DB_PORT"
 echo ""
 
+# =========================================================================
+# STEP 0: Ensure tables exist (idempotent schema creation)
+# =========================================================================
+echo "0️⃣  Ensuring database schema exists..."
+
+PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" <<'EOSQL'
+-- Create tables if they don't exist (idempotent)
+
+CREATE TABLE IF NOT EXISTS users (
+    id SERIAL PRIMARY KEY,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    password VARCHAR(255) NOT NULL,
+    role VARCHAR(50) NOT NULL,
+    first_name VARCHAR(100),
+    last_name VARCHAR(100),
+    phone VARCHAR(20),
+    subject VARCHAR(100),
+    rut VARCHAR(20),
+    is_active BOOLEAN DEFAULT true,
+    email_verified BOOLEAN DEFAULT false,
+    active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS guardians (
+    id SERIAL PRIMARY KEY,
+    full_name VARCHAR(255) NOT NULL,
+    relationship VARCHAR(50),
+    rut VARCHAR(20) UNIQUE,
+    email VARCHAR(255),
+    phone VARCHAR(20),
+    address TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS students (
+    id SERIAL PRIMARY KEY,
+    rut VARCHAR(20) UNIQUE NOT NULL,
+    first_name VARCHAR(100) NOT NULL,
+    paternal_last_name VARCHAR(100),
+    maternal_last_name VARCHAR(100),
+    date_of_birth DATE,
+    birth_date DATE,
+    gender VARCHAR(10),
+    email VARCHAR(255),
+    phone VARCHAR(20),
+    address TEXT,
+    previous_school VARCHAR(255),
+    current_grade VARCHAR(50),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS applications (
+    id SERIAL PRIMARY KEY,
+    student_id INTEGER REFERENCES students(id) ON DELETE CASCADE,
+    guardian_id INTEGER REFERENCES guardians(id),
+    applicant_user_id INTEGER REFERENCES users(id),
+    application_year INTEGER NOT NULL,
+    status VARCHAR(50) DEFAULT 'PENDING',
+    priority INTEGER DEFAULT 0,
+    notes TEXT,
+    submission_date TIMESTAMP,
+    submitted_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(student_id)
+);
+
+CREATE TABLE IF NOT EXISTS interviewer_schedules (
+    id SERIAL PRIMARY KEY,
+    interviewer_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    day_of_week VARCHAR(20) NOT NULL,
+    start_time TIME NOT NULL,
+    end_time TIME NOT NULL,
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create indexes if they don't exist
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+CREATE INDEX IF NOT EXISTS idx_guardians_rut ON guardians(rut);
+CREATE INDEX IF NOT EXISTS idx_students_rut ON students(rut);
+CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);
+CREATE INDEX IF NOT EXISTS idx_applications_student ON applications(student_id);
+
+EOSQL
+
+if [ $? -eq 0 ]; then
+    echo "✅ Database schema ready (tables created/verified)"
+else
+    echo "❌ Schema creation failed"
+    exit 1
+fi
+
+echo ""
+
 # Function to execute SQL
 execute_sql() {
     local sql="$1"
