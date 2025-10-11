@@ -726,6 +726,7 @@ app.get('/api/applications', async (req, res) => {
         s.grade_applied as student_grade,
         s.current_school as student_current_school,
         s.address as student_address,
+        s.admission_preference as student_admission_preference,
 
         -- Father information
         f.id as father_id,
@@ -1170,6 +1171,7 @@ app.get('/api/applications/search', async (req, res) => {
         s.grade_applied as student_grade,
         s.current_school as student_current_school,
         s.address as student_address,
+        s.admission_preference as student_admission_preference,
 
         -- Father information
         f.id as father_id,
@@ -1725,6 +1727,7 @@ app.get('/api/applications/:id', async (req, res) => {
         s.grade_applied as student_grade,
         s.current_school as student_current_school,
         s.address as student_address,
+        s.admission_preference as student_admission_preference,
         s.email as student_email,
         s.additional_notes as student_notes,
 
@@ -1817,7 +1820,10 @@ app.get('/api/applications/:id', async (req, res) => {
         d.file_name,
         d.original_name,
         d.file_size,
-        d.is_required
+        d.is_required,
+        d.approval_status,
+        d.reviewed_at,
+        d.reviewed_by
       FROM documents d
       WHERE d.application_id = $1
       ORDER BY d.created_at DESC
@@ -1844,7 +1850,9 @@ app.get('/api/applications/:id', async (req, res) => {
       student: {
         id: row.student_id,
         firstName: row.student_first_name,
-        lastName: `${row.student_paternal_last_name} ${row.student_maternal_last_name || ''}`.trim(),
+        paternalLastName: row.student_paternal_last_name,
+        maternalLastName: row.student_maternal_last_name || '',
+        lastName: `${row.student_paternal_last_name} ${row.student_maternal_last_name || ''}`.trim(), // Apellido completo para compatibilidad
         fullName: `${row.student_first_name} ${row.student_paternal_last_name} ${row.student_maternal_last_name || ''}`.trim(),
         rut: row.student_rut,
         birthDate: row.student_birth_date,
@@ -1918,7 +1926,10 @@ app.get('/api/applications/:id', async (req, res) => {
             uploadDate: doc.upload_date,
             filePath: doc.file_path,
             fileSize: doc.file_size,
-            isRequired: doc.is_required
+            isRequired: doc.is_required,
+            approval_status: doc.approval_status,
+            reviewed_at: doc.reviewed_at,
+            reviewed_by: doc.reviewed_by
           }))
         : [],
       
@@ -1974,8 +1985,8 @@ app.post('/api/applications', authenticateToken, validateApplicationInput, async
         INSERT INTO students (
           first_name, paternal_last_name, maternal_last_name, rut,
           birth_date, grade_applied, current_school, address,
-          email, school_applied, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+          email, school_applied, admission_preference, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
         RETURNING id
       `;
 
@@ -1989,7 +2000,8 @@ app.post('/api/applications', authenticateToken, validateApplicationInput, async
         body.currentSchool || null,
         body.studentAddress || null,
         body.studentEmail || null,
-        body.schoolApplied || 'MONTE_TABOR' // default school
+        body.schoolApplied || 'MONTE_TABOR', // default school
+        body.admissionPreference || 'NINGUNA' // admission preference
       ]);
 
       const studentId = studentResult.rows[0].id;
@@ -2288,7 +2300,7 @@ app.put('/api/applications/:id', authenticateToken, async (req, res) => {
       // Update student if provided
       if (student) {
         const studentUpdateQuery = `
-          UPDATE students SET 
+          UPDATE students SET
             first_name = COALESCE($1, first_name),
             paternal_last_name = COALESCE($2, paternal_last_name),
             maternal_last_name = COALESCE($3, maternal_last_name),
@@ -2299,8 +2311,9 @@ app.put('/api/applications/:id', authenticateToken, async (req, res) => {
             address = COALESCE($8, address),
             email = COALESCE($9, email),
             additional_notes = COALESCE($10, additional_notes),
+            admission_preference = COALESCE($11, admission_preference),
             updated_at = NOW()
-          WHERE id = $11
+          WHERE id = $12
         `;
 
         await client.query(studentUpdateQuery, [
@@ -2314,6 +2327,7 @@ app.put('/api/applications/:id', authenticateToken, async (req, res) => {
           student.address,
           student.email,
           student.notes || student.additionalNotes,
+          student.admissionPreference || 'NINGUNA',
           existingApp.student_id
         ]);
       }
@@ -3031,7 +3045,10 @@ app.get('/api/applications/:id/documents', authenticateToken, async (req, res) =
         content_type,
         is_required,
         created_at,
-        updated_at
+        updated_at,
+        approval_status,
+        reviewed_at,
+        reviewed_by
       FROM documents
       WHERE application_id = $1
       ORDER BY created_at DESC
@@ -3050,6 +3067,93 @@ app.get('/api/applications/:id/documents', authenticateToken, async (req, res) =
     res.status(500).json({
       success: false,
       error: 'Error interno del servidor al obtener documentos',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// PUT /api/applications/documents/:documentId/approval - Update document approval status
+app.put('/api/applications/documents/:documentId/approval', authenticateToken, async (req, res) => {
+  const client = await dbPool.connect();
+
+  try {
+    const documentId = parseInt(req.params.documentId);
+    const { approvalStatus } = req.body; // APPROVED, REJECTED, PENDING
+
+    if (!documentId || isNaN(documentId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'ID de documento inválido'
+      });
+    }
+
+    // Validate approval status
+    const validStatuses = ['PENDING', 'APPROVED', 'REJECTED'];
+    if (!approvalStatus || !validStatuses.includes(approvalStatus)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Estado de aprobación inválido. Debe ser: PENDING, APPROVED, o REJECTED'
+      });
+    }
+
+    // Only admins and coordinators can approve documents
+    const isAdmin = req.user.role === 'ADMIN' ||
+                    req.user.role === 'COORDINATOR' ||
+                    req.user.role === 'CYCLE_DIRECTOR';
+
+    if (!isAdmin) {
+      return res.status(403).json({
+        success: false,
+        error: 'No tienes permisos para aprobar documentos'
+      });
+    }
+
+    // Update document approval status
+    const updateQuery = `
+      UPDATE documents
+      SET
+        approval_status = $1,
+        reviewed_at = NOW(),
+        reviewed_by = $2,
+        updated_at = NOW()
+      WHERE id = $3
+      RETURNING
+        id,
+        approval_status,
+        reviewed_at,
+        reviewed_by,
+        document_type,
+        file_name
+    `;
+
+    const result = await writeOperationBreaker.fire(
+      client,
+      updateQuery,
+      [approvalStatus, req.user.userId, documentId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Documento no encontrado'
+      });
+    }
+
+    console.log(`✅ Documento ${documentId} actualizado a estado: ${approvalStatus} por usuario ${req.user.userId}`);
+
+    res.json({
+      success: true,
+      message: 'Estado de aprobación actualizado exitosamente',
+      document: result.rows[0]
+    });
+
+  } catch (error) {
+    console.error('❌ Error updating document approval status:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error interno del servidor al actualizar estado de aprobación',
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   } finally {
@@ -3182,6 +3286,118 @@ app.get('/api/documents/:documentId/download', authenticateToken, async (req, re
     res.status(500).json({
       success: false,
       error: 'Error al descargar el documento'
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// ============================================================================
+// DOCUMENT VIEW ENDPOINT (with query token support for iframes)
+// ============================================================================
+app.get('/api/applications/documents/view/:documentId', async (req, res) => {
+  const client = await dbPool.connect();
+
+  try {
+    const documentId = parseInt(req.params.documentId);
+
+    if (!documentId || isNaN(documentId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'ID de documento inválido'
+      });
+    }
+
+    // Get token from query params or Authorization header (for iframe support)
+    const token = req.query.token || req.headers.authorization?.replace('Bearer ', '');
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        error: 'Token de autenticación requerido'
+      });
+    }
+
+    // Decode token using same approach as authenticateToken middleware
+    // Mock services use base64-encoded JWT format without actual signature verification
+    let user;
+    try {
+      if (token && token.split('.').length === 3) {
+        // Decode the JWT payload (base64 decode the middle part)
+        const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
+        user = {
+          userId: payload.userId,
+          email: payload.email,
+          role: payload.role
+        };
+      } else {
+        // Fallback for invalid token format
+        throw new Error('Invalid token format');
+      }
+    } catch (err) {
+      console.error('❌ Token decoding error:', err.message);
+      return res.status(401).json({
+        success: false,
+        error: 'Token inválido o expirado'
+      });
+    }
+
+    // Get document info
+    const documentQuery = 'SELECT * FROM documents WHERE id = $1';
+    const documentResult = await client.query(documentQuery, [documentId]);
+
+    if (documentResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Documento no encontrado'
+      });
+    }
+
+    const document = documentResult.rows[0];
+
+    // Authorization: User must own the application or be admin
+    const appQuery = 'SELECT applicant_user_id FROM applications WHERE id = $1';
+    const appResult = await client.query(appQuery, [document.application_id]);
+
+    if (appResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Aplicación no encontrada'
+      });
+    }
+
+    const isOwner = appResult.rows[0].applicant_user_id &&
+                    appResult.rows[0].applicant_user_id.toString() === user.userId;
+    const isAdmin = user.role === 'ADMIN' ||
+                    user.role === 'COORDINATOR' ||
+                    user.role === 'CYCLE_DIRECTOR';
+
+    if (!isOwner && !isAdmin) {
+      return res.status(403).json({
+        success: false,
+        error: 'No tienes permisos para ver este documento'
+      });
+    }
+
+    // Check if file exists
+    const fs = require('fs');
+    if (!fs.existsSync(document.file_path)) {
+      return res.status(404).json({
+        success: false,
+        error: 'Archivo no encontrado en el servidor'
+      });
+    }
+
+    // Send file for inline viewing
+    res.setHeader('Content-Type', document.content_type || 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${document.original_name}"`);
+    res.sendFile(document.file_path);
+
+  } catch (error) {
+    console.error('❌ Error viewing document:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al visualizar el documento'
     });
   } finally {
     client.release();

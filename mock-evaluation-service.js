@@ -180,10 +180,10 @@ const evaluationCache = new SimpleCache();
 function translateInterview(interview) {
   if (!interview) return interview;
 
+  // DO NOT translate status or type - frontend expects English enum values
   return {
-    ...interview,
-    status: translateToSpanish(interview.status, 'interview_status')
-    // DO NOT translate type - frontend expects English enum values
+    ...interview
+    // status: translateToSpanish(interview.status, 'interview_status')
     // type: translateToSpanish(interview.type, 'interview_type')
   };
 }
@@ -314,7 +314,8 @@ function getSubjectFromEvaluationType(evaluationType) {
     'ENGLISH_EXAM': 'ENGLISH',
     'SCIENCE_EXAM': 'SCIENCE',
     'HISTORY_EXAM': 'HISTORY',
-    'PSYCHOLOGICAL_INTERVIEW': 'PSYCHOLOGY'
+    'PSYCHOLOGICAL_INTERVIEW': 'PSYCHOLOGY',
+    'FAMILY_INTERVIEW': 'GENERAL'
   };
   return typeMap[evaluationType] || 'GENERAL';
 }
@@ -338,7 +339,8 @@ function getSubjectDisplayName(evaluationType, professorSubject) {
     'ENGLISH_EXAM': 'Inglés',
     'SCIENCE_EXAM': 'Ciencias Naturales',
     'HISTORY_EXAM': 'Historia y Geografía',
-    'PSYCHOLOGICAL_INTERVIEW': 'Evaluación Psicológica'
+    'PSYCHOLOGICAL_INTERVIEW': 'Evaluación Psicológica',
+    'FAMILY_INTERVIEW': 'Entrevista Familiar'
   };
   return typeNames[evaluationType] || 'Evaluación General';
 }
@@ -477,19 +479,9 @@ app.get('/api/evaluations/metadata/types', async (req, res) => {
         description: 'Evaluación de nivel de inglés'
       },
       {
-        code: 'PSYCHOLOGICAL_EVALUATION',
-        name: 'Evaluación Psicológica',
-        description: 'Evaluación del desarrollo emocional y social del estudiante'
-      },
-      {
-        code: 'INTERVIEW',
-        name: 'Entrevista',
-        description: 'Entrevista personal con estudiante y/o apoderados'
-      },
-      {
-        code: 'ENTRANCE_EXAM',
-        name: 'Examen de Admisión',
-        description: 'Examen general de admisión'
+        code: 'FAMILY_INTERVIEW',
+        name: 'Entrevista Familiar',
+        description: 'Evaluación integral de la familia y motivación para el ingreso'
       }
     ];
 
@@ -1037,19 +1029,21 @@ app.get('/api/interviews/available-slots', async (req, res) => {
     }
 
     // Obtener entrevistas ya agendadas para este entrevistador en esta fecha
+    // 🔒 IMPORTANTE: Verificar TANTO interviewer_id COMO second_interviewer_id
+    // para evitar conflictos de horarios cuando un profesor está en entrevistas familiares
     const occupiedQuery = await client.query(
       `SELECT DATE(scheduled_date) as date,
               TO_CHAR(scheduled_date, 'HH24:MI') as time,
               duration_minutes
        FROM interviews
-       WHERE interviewer_id = $1
+       WHERE (interviewer_id = $1 OR second_interviewer_id = $1)
          AND DATE(scheduled_date) = $2
          AND status IN ('SCHEDULED', 'CONFIRMED', 'IN_PROGRESS')`,
       [parseInt(interviewerId), date]
     );
 
     const occupiedSlots = new Set(occupiedQuery.rows.map(row => row.time));
-    console.log(`📅 Slots ocupados para ${date}:`, Array.from(occupiedSlots));
+    console.log(`📅 Slots ocupados para entrevistador ${interviewerId} en ${date}:`, Array.from(occupiedSlots));
 
     // Generar slots disponibles basados en horarios reales
     const availableSlots = [];
@@ -1269,6 +1263,7 @@ app.post('/api/interviews', async (req, res) => {
   const {
     applicationId,
     interviewerId,
+    secondInterviewerId,  // Segundo entrevistador (opcional, requerido para FAMILY)
     scheduledDate,
     scheduledTime,  // Añadir scheduledTime
     duration,
@@ -1288,8 +1283,16 @@ app.post('/api/interviews', async (req, res) => {
     });
   }
 
-  // Validar tipos permitidos según DB constraints
-  const validInterviewTypes = ['INDIVIDUAL', 'FAMILY', 'PSYCHOLOGICAL', 'ACADEMIC', 'BEHAVIORAL'];
+  // Validar segundo entrevistador para entrevistas FAMILY
+  if (type === 'FAMILY' && !secondInterviewerId) {
+    return res.status(400).json({
+      success: false,
+      error: 'Las entrevistas familiares requieren un segundo entrevistador'
+    });
+  }
+
+  // Validar tipos permitidos según DB constraints (solo FAMILY y CYCLE_DIRECTOR)
+  const validInterviewTypes = ['FAMILY', 'CYCLE_DIRECTOR'];
   if (!validInterviewTypes.includes(type)) {
     return res.status(400).json({
       success: false,
@@ -1389,11 +1392,8 @@ app.post('/api/interviews', async (req, res) => {
     if (existingInterviewQuery.rows.length > 0) {
       const existing = existingInterviewQuery.rows[0];
       const typeLabels = {
-        'INDIVIDUAL': 'Individual',
         'FAMILY': 'Familiar',
-        'PSYCHOLOGICAL': 'Psicológica',
-        'ACADEMIC': 'Académica',
-        'BEHAVIORAL': 'Conductual'
+        'CYCLE_DIRECTOR': 'Director de Ciclo'
       };
 
       console.log(`❌ Ya existe entrevista ${type} activa (ID: ${existing.id})`);
@@ -1416,11 +1416,12 @@ app.post('/api/interviews', async (req, res) => {
 
     console.log(`✅ No existe entrevista ${type} activa, continuando...`);
 
-    // 🔒 VALIDACIÓN 2: Verificar que el slot no esté ocupado
+    // 🔒 VALIDACIÓN 2: Verificar que el slot no esté ocupado para AMBOS entrevistadores
+    // Para entrevistas FAMILY, necesitamos verificar que AMBOS entrevistadores estén disponibles
     const conflictQuery = `
-      SELECT id, scheduled_date, status
+      SELECT id, scheduled_date, status, interviewer_id, second_interviewer_id
       FROM interviews
-      WHERE interviewer_id = $1
+      WHERE (interviewer_id = $1 OR second_interviewer_id = $1)
         AND scheduled_date = $2
         AND status IN ('SCHEDULED', 'CONFIRMED', 'IN_PROGRESS')
     `;
@@ -1432,12 +1433,12 @@ app.post('/api/interviews', async (req, res) => {
 
     if (conflictResult.rows.length > 0) {
       const existingInterview = conflictResult.rows[0];
-      console.log('❌ CONFLICTO DE HORARIO detectado:', existingInterview);
+      console.log('❌ CONFLICTO DE HORARIO detectado para primer entrevistador:', existingInterview);
 
       return res.status(409).json({
         success: false,
         error: 'SLOT_ALREADY_TAKEN',
-        message: 'Este horario ya está reservado. Por favor seleccione otro horario.',
+        message: 'El primer entrevistador ya tiene una entrevista programada en este horario. Por favor seleccione otro horario.',
         details: {
           interviewerId: interviewerId,
           scheduledDate: normalizedScheduledDate,
@@ -1447,13 +1448,51 @@ app.post('/api/interviews', async (req, res) => {
       });
     }
 
-    console.log('✅ Slot disponible, procediendo con la creación...');
+    console.log('✅ Primer entrevistador disponible');
+
+    // Si es entrevista FAMILY, también verificar disponibilidad del segundo entrevistador
+    if (type === 'FAMILY' && secondInterviewerId) {
+      const secondConflictQuery = `
+        SELECT id, scheduled_date, status, interviewer_id, second_interviewer_id
+        FROM interviews
+        WHERE (interviewer_id = $1 OR second_interviewer_id = $1)
+          AND scheduled_date = $2
+          AND status IN ('SCHEDULED', 'CONFIRMED', 'IN_PROGRESS')
+      `;
+
+      const secondConflictResult = await client.query(secondConflictQuery, [
+        parseInt(secondInterviewerId),
+        normalizedScheduledDate
+      ]);
+
+      if (secondConflictResult.rows.length > 0) {
+        const existingInterview = secondConflictResult.rows[0];
+        console.log('❌ CONFLICTO DE HORARIO detectado para segundo entrevistador:', existingInterview);
+
+        return res.status(409).json({
+          success: false,
+          error: 'SECOND_INTERVIEWER_SLOT_TAKEN',
+          message: 'El segundo entrevistador ya tiene una entrevista programada en este horario. Por favor seleccione otro horario u otro entrevistador.',
+          details: {
+            secondInterviewerId: secondInterviewerId,
+            scheduledDate: normalizedScheduledDate,
+            existingInterviewId: existingInterview.id,
+            existingStatus: existingInterview.status
+          }
+        });
+      }
+
+      console.log('✅ Segundo entrevistador disponible');
+    }
+
+    console.log('✅ Slot disponible para ambos entrevistadores, procediendo con la creación...');
 
     // Insertar la nueva entrevista en la base de datos
     const insertQuery = `
       INSERT INTO interviews (
         application_id,
         interviewer_id,
+        second_interviewer_id,
         scheduled_date,
         duration_minutes,
         interview_type,
@@ -1463,8 +1502,9 @@ app.post('/api/interviews', async (req, res) => {
         location,
         created_at,
         updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
       RETURNING id, application_id as "applicationId", interviewer_id as "interviewerId",
+               second_interviewer_id as "secondInterviewerId",
                scheduled_date as "scheduledDate", duration_minutes as duration,
                interview_type as type, interview_mode as mode, status, notes, location,
                created_at as "createdAt", updated_at as "updatedAt"
@@ -1473,6 +1513,7 @@ app.post('/api/interviews', async (req, res) => {
     const values = [
       parseInt(applicationId),
       parseInt(interviewerId),
+      secondInterviewerId ? parseInt(secondInterviewerId) : null,
       normalizedScheduledDate,
       parseInt(duration) || 60,
       type,
@@ -1496,6 +1537,7 @@ app.post('/api/interviews', async (req, res) => {
         i.id,
         i.application_id as "applicationId",
         i.interviewer_id as "interviewerId",
+        i.second_interviewer_id as "secondInterviewerId",
         i.scheduled_date as "scheduledDate",
         i.duration_minutes as duration,
         i.interview_type as type,
@@ -1507,12 +1549,14 @@ app.post('/api/interviews', async (req, res) => {
         CONCAT(s.first_name, ' ', s.paternal_last_name, ' ', COALESCE(s.maternal_last_name, '')) as "studentName",
         g.full_name as "parentNames",
         s.grade_applied as "gradeApplied",
-        CONCAT(u.first_name, ' ', u.last_name) as "interviewerName"
+        CONCAT(u.first_name, ' ', u.last_name) as "interviewerName",
+        CONCAT(u2.first_name, ' ', u2.last_name) as "secondInterviewerName"
       FROM interviews i
       JOIN applications a ON i.application_id = a.id
       JOIN students s ON a.student_id = s.id
       JOIN guardians g ON a.guardian_id = g.id
       JOIN users u ON i.interviewer_id = u.id
+      LEFT JOIN users u2 ON i.second_interviewer_id = u2.id
       WHERE i.id = $1
     `;
 
@@ -1549,6 +1593,8 @@ app.post('/api/interviews', async (req, res) => {
       gradeApplied: interviewData.gradeApplied,
       interviewerId: parseInt(interviewData.interviewerId),
       interviewerName: interviewData.interviewerName,
+      secondInterviewerId: interviewData.secondInterviewerId ? parseInt(interviewData.secondInterviewerId) : null,
+      secondInterviewerName: interviewData.secondInterviewerName || null,
       status: interviewData.status,
       type: interviewData.type,
       mode: mode || 'IN_PERSON',
@@ -1595,6 +1641,18 @@ app.post('/api/interviews', async (req, res) => {
           [parseInt(interviewerId)]
         );
 
+        // 📧 Si hay segundo entrevistador, obtener sus datos también
+        let secondInterviewerData = null;
+        if (secondInterviewerId) {
+          const secondInterviewerQuery = await notifClient.query(
+            `SELECT email, first_name, last_name
+             FROM users
+             WHERE id = $1`,
+            [parseInt(secondInterviewerId)]
+          );
+          secondInterviewerData = secondInterviewerQuery.rows[0];
+        }
+
         if (guardiansQuery.rows.length > 0) {
           const guardian = guardiansQuery.rows[0];
           const interviewer = interviewerQuery.rows[0];
@@ -1603,6 +1661,12 @@ app.post('/api/interviews', async (req, res) => {
           const interviewDate = new Date(newInterview.scheduledDate);
           const dateStr = interviewDate.toLocaleDateString('es-CL');
           const timeStr = interviewDate.toLocaleTimeString('es-CL', { hour: '2-digit', minute: '2-digit' });
+
+          // Preparar nombres de entrevistadores para el apoderado
+          let interviewersNames = interviewer ? `${interviewer.first_name} ${interviewer.last_name}` : 'Por confirmar';
+          if (secondInterviewerData) {
+            interviewersNames += ` y ${secondInterviewerData.first_name} ${secondInterviewerData.last_name}`;
+          }
 
           // Enviar email al apoderado (sin await para no bloquear)
           axios.post('http://localhost:8085/api/notifications/send', {
@@ -1616,12 +1680,12 @@ app.post('/api/interviews', async (req, res) => {
               interviewDate: dateStr,
               interviewTime: timeStr,
               location: newInterview.location,
-              interviewerName: interviewer ? `${interviewer.first_name} ${interviewer.last_name}` : 'Por confirmar',
+              interviewerName: interviewersNames,
               duration: newInterview.duration
             }
           }).catch(err => console.error('Error enviando email a apoderado:', err.message));
 
-          // Enviar email al entrevistador (sin await para no bloquear)
+          // Enviar email al primer entrevistador (sin await para no bloquear)
           if (interviewer) {
             axios.post('http://localhost:8085/api/notifications/send', {
               to: interviewer.email,
@@ -1635,12 +1699,35 @@ app.post('/api/interviews', async (req, res) => {
                 interviewDate: dateStr,
                 interviewTime: timeStr,
                 location: newInterview.location,
-                duration: newInterview.duration
+                duration: newInterview.duration,
+                coInterviewer: secondInterviewerData ? `${secondInterviewerData.first_name} ${secondInterviewerData.last_name}` : null
               }
-            }).catch(err => console.error('Error enviando email a entrevistador:', err.message));
+            }).catch(err => console.error('Error enviando email a entrevistador 1:', err.message));
           }
 
-          console.log('✅ Notificaciones iniciadas en segundo plano');
+          // 📧 Enviar email al segundo entrevistador si existe
+          if (secondInterviewerData) {
+            axios.post('http://localhost:8085/api/notifications/send', {
+              to: secondInterviewerData.email,
+              subject: `Nueva Entrevista Asignada - ${guardian.student_name} ${guardian.student_lastname}`,
+              type: 'interview_scheduled_interviewer',
+              data: {
+                interviewerName: `${secondInterviewerData.first_name} ${secondInterviewerData.last_name}`,
+                studentName: `${guardian.student_name} ${guardian.student_lastname}`,
+                guardianName: guardian.full_name,
+                interviewType: type,
+                interviewDate: dateStr,
+                interviewTime: timeStr,
+                location: newInterview.location,
+                duration: newInterview.duration,
+                coInterviewer: interviewer ? `${interviewer.first_name} ${interviewer.last_name}` : null
+              }
+            }).catch(err => console.error('Error enviando email a entrevistador 2:', err.message));
+
+            console.log(`📧 Email enviado a segundo entrevistador: ${secondInterviewerData.email}`);
+          }
+
+          console.log(`✅ Notificaciones iniciadas en segundo plano (${secondInterviewerData ? '3 emails' : '2 emails'})`);
         }
       } catch (emailError) {
         console.error('⚠️ Error preparando notificaciones:', emailError.message);
@@ -1695,7 +1782,7 @@ app.post('/api/interviews', async (req, res) => {
 
 // Endpoint para obtener entrevistas (con filtros)
 app.get('/api/interviews', async (req, res) => {
-  const { applicationId, interviewerId, status, date } = req.query;
+  const { applicationId, interviewerId, status, date, type, mode, startDate, endDate } = req.query;
 
   console.log('📋 Obteniendo entrevistas con filtros:', req.query);
 
@@ -1706,6 +1793,7 @@ app.get('/api/interviews', async (req, res) => {
         i.id,
         i.application_id,
         i.interviewer_id,
+        i.second_interviewer_id,
         i.scheduled_date,
         i.duration_minutes,
         i.status,
@@ -1713,11 +1801,13 @@ app.get('/api/interviews', async (req, res) => {
         i.notes,
         i.created_at,
         s.first_name || ' ' || s.paternal_last_name as student_name,
-        u.first_name || ' ' || u.last_name as interviewer_name
+        u.first_name || ' ' || u.last_name as interviewer_name,
+        u2.first_name || ' ' || u2.last_name as second_interviewer_name
       FROM interviews i
       JOIN applications a ON a.id = i.application_id
       JOIN students s ON s.id = a.student_id
       JOIN users u ON u.id = i.interviewer_id
+      LEFT JOIN users u2 ON u2.id = i.second_interviewer_id
       WHERE 1=1
     `;
 
@@ -1732,7 +1822,8 @@ app.get('/api/interviews', async (req, res) => {
 
     if (interviewerId) {
       paramCount++;
-      query += ` AND i.interviewer_id = $${paramCount}`;
+      // Buscar entrevistas donde el usuario es el entrevistador principal O el segundo entrevistador
+      query += ` AND (i.interviewer_id = $${paramCount} OR i.second_interviewer_id = $${paramCount})`;
       params.push(parseInt(interviewerId));
     }
 
@@ -1742,10 +1833,31 @@ app.get('/api/interviews', async (req, res) => {
       params.push(status);
     }
 
+    if (type) {
+      paramCount++;
+      query += ` AND i.interview_type = $${paramCount}`;
+      params.push(type);
+    }
+
+    // Note: mode filter not implemented in DB yet, will be filtered in-memory
+    // This would require adding a 'mode' column to interviews table
+
     if (date) {
       paramCount++;
       query += ` AND DATE(i.scheduled_date) = $${paramCount}`;
       params.push(date);
+    }
+
+    if (startDate) {
+      paramCount++;
+      query += ` AND i.scheduled_date >= $${paramCount}`;
+      params.push(startDate);
+    }
+
+    if (endDate) {
+      paramCount++;
+      query += ` AND i.scheduled_date <= $${paramCount}`;
+      params.push(endDate);
     }
 
     query += ` ORDER BY i.scheduled_date`;
@@ -1769,6 +1881,7 @@ app.get('/api/interviews', async (req, res) => {
         id: row.id,
         applicationId: row.application_id,
         interviewerId: row.interviewer_id,
+        secondInterviewerId: row.second_interviewer_id,
         scheduledDate: localISOString,
         duration: row.duration_minutes,
         type: row.interview_type, // ✅ Usar el tipo real de la BD
@@ -1778,15 +1891,28 @@ app.get('/api/interviews', async (req, res) => {
         notes: row.notes || '',
         createdAt: row.created_at.toISOString(),
         studentName: row.student_name,
-        interviewerName: row.interviewer_name
+        interviewerName: row.interviewer_name,
+        secondInterviewerName: row.second_interviewer_name
       };
     });
 
-    // Traducir estados y tipos al español antes de devolver
-    const translatedInterviews = translateInterviews(formattedInterviews);
+    // Filtrar por mode si se especificó (filtro en memoria ya que no está en BD)
+    let finalInterviews = formattedInterviews;
+    if (mode) {
+      finalInterviews = formattedInterviews.filter(interview => interview.mode === mode);
+    }
 
-    // Return raw array (unwrapped) for QA test compatibility
-    res.json(translatedInterviews);
+    // Traducir estados y tipos al español antes de devolver
+    const translatedInterviews = translateInterviews(finalInterviews);
+
+    console.log(`✅ Retornando ${translatedInterviews.length} entrevistas después de aplicar filtros`);
+
+    // Return wrapped format for frontend compatibility
+    res.json({
+      success: true,
+      data: translatedInterviews,
+      count: translatedInterviews.length
+    });
   } catch (error) {
     console.error('Database error:', error);
     // Fallback to mock data
@@ -1797,7 +1923,11 @@ app.get('/api/interviews', async (req, res) => {
     }
 
     if (interviewerId) {
-      filteredInterviews = filteredInterviews.filter(i => i.interviewerId === parseInt(interviewerId));
+      // Buscar entrevistas donde el usuario es el entrevistador principal O el segundo entrevistador
+      filteredInterviews = filteredInterviews.filter(i =>
+        i.interviewerId === parseInt(interviewerId) ||
+        i.secondInterviewerId === parseInt(interviewerId)
+      );
     }
 
     if (status) {
@@ -1808,8 +1938,12 @@ app.get('/api/interviews', async (req, res) => {
       filteredInterviews = filteredInterviews.filter(i => i.scheduledDate.startsWith(date));
     }
 
-    // Return raw array (unwrapped) for QA test compatibility
-    res.json(filteredInterviews);
+    // Return wrapped format for frontend compatibility
+    res.json({
+      success: true,
+      data: filteredInterviews,
+      count: filteredInterviews.length
+    });
   } finally {
     client.release();
   }
@@ -1894,10 +2028,10 @@ app.get('/api/interviews/calendar', async (req, res) => {
       params.push(endDate);
     }
 
-    // Filtrar por entrevistador si se especifica
+    // Filtrar por entrevistador si se especifica (principal O segundo entrevistador)
     if (interviewerId) {
       paramCount++;
-      query += ` AND i.interviewer_id = $${paramCount}`;
+      query += ` AND (i.interviewer_id = $${paramCount} OR i.second_interviewer_id = $${paramCount})`;
       params.push(parseInt(interviewerId));
     }
 
@@ -2034,8 +2168,10 @@ app.get('/api/interviews/calendar', async (req, res) => {
     }
     
     if (interviewerId) {
-      filteredMockInterviews = filteredMockInterviews.filter(interview => 
-        interview.interviewerId === parseInt(interviewerId)
+      // Buscar entrevistas donde el usuario es el entrevistador principal O el segundo entrevistador
+      filteredMockInterviews = filteredMockInterviews.filter(interview =>
+        interview.interviewerId === parseInt(interviewerId) ||
+        interview.secondInterviewerId === parseInt(interviewerId)
       );
     }
 
@@ -2173,11 +2309,11 @@ app.get('/api/interviews/availability', async (req, res) => {
     // Construir fecha/hora en formato esperado por la DB
     const scheduledDateTime = `${date} ${time}:00`;
 
-    // Query para buscar conflictos
+    // 🔒 Query para buscar conflictos - verificar TANTO interviewer_id COMO second_interviewer_id
     const query = `
       SELECT id, status, scheduled_date
       FROM interviews
-      WHERE interviewer_id = $1
+      WHERE (interviewer_id = $1 OR second_interviewer_id = $1)
         AND scheduled_date = $2
         AND status IN ('SCHEDULED', 'CONFIRMED', 'IN_PROGRESS')
         ${excludeInterviewId ? 'AND id != $3' : ''}
@@ -2317,6 +2453,12 @@ app.put('/api/interviews/:id', async (req, res) => {
       updateValues.push(req.body.interviewerId);
     }
 
+    if (req.body.secondInterviewerId !== undefined) {
+      paramCount++;
+      updateFields.push(`second_interviewer_id = $${paramCount}`);
+      updateValues.push(req.body.secondInterviewerId);
+    }
+
     // Agregar updated_at
     paramCount++;
     updateFields.push(`updated_at = $${paramCount}`);
@@ -2343,8 +2485,22 @@ app.put('/api/interviews/:id', async (req, res) => {
     console.log('📝 Ejecutando actualización:', updateQuery, updateValues);
     const result = await client.query(updateQuery, updateValues);
 
+    // Obtener los nombres de los entrevistadores desde la BD
+    const enrichedQuery = `
+      SELECT
+        i.*,
+        CONCAT(u.first_name, ' ', u.last_name) as interviewer_name,
+        CONCAT(u2.first_name, ' ', u2.last_name) as second_interviewer_name
+      FROM interviews i
+      JOIN users u ON i.interviewer_id = u.id
+      LEFT JOIN users u2 ON i.second_interviewer_id = u2.id
+      WHERE i.id = $1
+    `;
+    const enrichedResult = await client.query(enrichedQuery, [interviewId]);
+    const enrichedData = enrichedResult.rows[0];
+
     // Formatear fecha en zona horaria local (consistente con GET)
-    const localDate = new Date(result.rows[0].scheduled_date);
+    const localDate = new Date(enrichedData.scheduled_date);
     const year = localDate.getFullYear();
     const month = String(localDate.getMonth() + 1).padStart(2, '0');
     const day = String(localDate.getDate()).padStart(2, '0');
@@ -2356,15 +2512,18 @@ app.put('/api/interviews/:id', async (req, res) => {
     res.json({
       success: true,
       data: {
-        id: result.rows[0].id,
-        applicationId: result.rows[0].application_id,
-        interviewerId: result.rows[0].interviewer_id,
+        id: enrichedData.id,
+        applicationId: enrichedData.application_id,
+        interviewerId: enrichedData.interviewer_id,
+        interviewerName: enrichedData.interviewer_name,
+        secondInterviewerId: enrichedData.second_interviewer_id,
+        secondInterviewerName: enrichedData.second_interviewer_name,
         scheduledDate: localISOString,
-        duration: result.rows[0].duration_minutes,
-        type: result.rows[0].interview_type,
-        status: result.rows[0].status,
-        notes: result.rows[0].notes || '',
-        updatedAt: result.rows[0].updated_at.toISOString()
+        duration: enrichedData.duration_minutes,
+        type: enrichedData.interview_type,
+        status: enrichedData.status,
+        notes: enrichedData.notes || '',
+        updatedAt: enrichedData.updated_at.toISOString()
       },
       message: 'Entrevista actualizada exitosamente'
     });
@@ -2381,27 +2540,55 @@ app.put('/api/interviews/:id', async (req, res) => {
 });
 
 // Endpoint para cancelar una entrevista
-app.delete('/api/interviews/:id', (req, res) => {
+app.delete('/api/interviews/:id', async (req, res) => {
   const interviewId = parseInt(req.params.id);
-  const interviewIndex = interviews.findIndex(i => i.id === interviewId);
 
-  if (interviewIndex === -1) {
-    return res.status(404).json({
-      success: false,
-      error: 'Entrevista no encontrada'
+  console.log('🗑️ Eliminando entrevista:', interviewId);
+
+  const client = await dbPool.connect();
+  try {
+    // Verificar si la entrevista existe
+    const checkQuery = 'SELECT id, status FROM interviews WHERE id = $1';
+    const checkResult = await client.query(checkQuery, [interviewId]);
+
+    if (checkResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Entrevista no encontrada'
+      });
+    }
+
+    const interview = checkResult.rows[0];
+
+    // Solo permitir eliminar entrevistas canceladas (seguridad adicional)
+    if (interview.status !== 'CANCELLED') {
+      return res.status(400).json({
+        success: false,
+        error: 'Solo se pueden eliminar entrevistas canceladas. Por favor cancele la entrevista primero.'
+      });
+    }
+
+    // Eliminar la entrevista de la base de datos
+    const deleteQuery = 'DELETE FROM interviews WHERE id = $1';
+    await client.query(deleteQuery, [interviewId]);
+
+    console.log('✅ Entrevista eliminada exitosamente:', interviewId);
+
+    res.json({
+      success: true,
+      message: 'Entrevista eliminada exitosamente'
     });
+
+  } catch (error) {
+    console.error('❌ Error eliminando entrevista:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al eliminar la entrevista',
+      details: error.message
+    });
+  } finally {
+    client.release();
   }
-
-  console.log('❌ Cancelando entrevista:', interviewId);
-
-  // Cambiar estado a cancelado en lugar de eliminar
-  interviews[interviewIndex].status = 'CANCELLED';
-  interviews[interviewIndex].cancelledAt = new Date().toISOString();
-
-  res.json({
-    success: true,
-    message: 'Entrevista cancelada exitosamente'
-  });
 });
 
 // GET interviews by application ID - endpoint específico para obtener entrevistas de una aplicación
@@ -2703,9 +2890,17 @@ app.get('/api/interviewer-schedules/interviewer/:interviewerId/year/:year', asyn
 app.post('/api/interviewer-schedules', async (req, res) => {
   const client = await dbPool.connect();
   try {
-    const { interviewer, dayOfWeek, startTime, endTime, year, scheduleType, isActive, notes } = req.body;
+    // Soporte para ambos formatos: interviewer (objeto) o interviewerId (número)
+    const { interviewer, interviewerId, dayOfWeek, startTime, endTime, year, scheduleType, isActive, notes } = req.body;
 
-    console.log(`📝 Creating new schedule for interviewer ${interviewer.id}:`, {
+    // Obtener el ID del entrevistador de cualquier formato
+    const actualInterviewerId = interviewer?.id || interviewerId;
+
+    if (!actualInterviewerId) {
+      return res.status(400).json({ error: 'Se requiere interviewerId o interviewer.id' });
+    }
+
+    console.log(`📝 Creating new schedule for interviewer ${actualInterviewerId}:`, {
       dayOfWeek, startTime, endTime, year, scheduleType, isActive
     });
 
@@ -2717,7 +2912,7 @@ app.post('/api/interviewer-schedules', async (req, res) => {
     `;
 
     const result = await client.query(query, [
-      interviewer.id,
+      actualInterviewerId,
       dayOfWeek,
       startTime,
       endTime,
@@ -2727,14 +2922,28 @@ app.post('/api/interviewer-schedules', async (req, res) => {
       notes || ''
     ]);
 
+    // Obtener información del entrevistador de la base de datos
+    const userQuery = `
+      SELECT id, first_name, last_name, email, role
+      FROM users
+      WHERE id = $1
+    `;
+    const userResult = await client.query(userQuery, [actualInterviewerId]);
+
+    if (userResult.rows.length === 0) {
+      throw new Error(`Usuario con ID ${actualInterviewerId} no encontrado`);
+    }
+
+    const user = userResult.rows[0];
+
     const newSchedule = {
       id: result.rows[0].id,
       interviewer: {
-        id: interviewer.id,
-        firstName: interviewer.firstName,
-        lastName: interviewer.lastName,
-        email: interviewer.email,
-        role: interviewer.role
+        id: user.id,
+        firstName: user.first_name,
+        lastName: user.last_name,
+        email: user.email,
+        role: user.role
       },
       dayOfWeek: result.rows[0].day_of_week,
       startTime: result.rows[0].start_time,
@@ -2947,7 +3156,10 @@ function isTimeInRange(targetTime, startTime, endTime) {
 // Helper function to get day of week from date
 function getDayOfWeek(dateString) {
   const days = ['SUNDAY', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY'];
-  const date = new Date(dateString);
+  // Parse as local date to avoid timezone issues
+  // dateString format: YYYY-MM-DD
+  const [year, month, day] = dateString.split('-').map(Number);
+  const date = new Date(year, month - 1, day); // month is 0-indexed
   return days[date.getDay()];
 }
 // Check real interviewer availability based on configured schedules and existing interviews
@@ -3005,12 +3217,13 @@ app.get('/api/interviews/availability/check', async (req, res) => {
     console.log(`✅ ${availableInterviewers.length} interviewers available at ${time}`);
 
     // Step 3: Check for conflicts with existing interviews
+    // 🔒 IMPORTANTE: Verificar TANTO interviewer_id COMO second_interviewer_id
     const conflictQuery = `
-      SELECT interviewer_id, scheduled_date, duration_minutes
+      SELECT interviewer_id, second_interviewer_id, scheduled_date, duration_minutes
       FROM interviews
       WHERE DATE(scheduled_date) = $1
         AND status NOT IN ('CANCELLED', 'NO_SHOW')
-        AND interviewer_id = ANY($2)
+        AND (interviewer_id = ANY($2) OR second_interviewer_id = ANY($2))
     `;
 
     const interviewerIds = availableInterviewers.map(i => i.interviewer_id);
@@ -3023,9 +3236,11 @@ app.get('/api/interviews/availability/check', async (req, res) => {
       console.log(`📊 Found ${conflictResult.rows.length} existing interviews on ${date}`);
 
       // Filter out interviewers with time conflicts
+      // 🔒 IMPORTANTE: Verificar conflictos tanto como interviewer_id o second_interviewer_id
       finalAvailable = availableInterviewers.filter(interviewer => {
         const conflicts = conflictResult.rows.filter(interview =>
-          interview.interviewer_id === interviewer.interviewer_id
+          interview.interviewer_id === interviewer.interviewer_id ||
+          interview.second_interviewer_id === interviewer.interviewer_id
         );
 
         for (const conflict of conflicts) {
@@ -3098,6 +3313,136 @@ app.get('/api/interviews/availability/check', async (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Error checking availability',
+      details: error.message
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// NEW: Check joint availability for 2 interviewers (for FAMILY interviews)
+app.post('/api/interviews/availability/check-dual', async (req, res) => {
+  const { firstInterviewerId, secondInterviewerId, scheduledDate, scheduledTime, duration = 60 } = req.body;
+
+  console.log('🔍 Checking dual availability:', req.body);
+
+  // Validar campos requeridos
+  if (!firstInterviewerId || !secondInterviewerId || !scheduledDate || !scheduledTime) {
+    return res.status(400).json({
+      success: false,
+      error: 'firstInterviewerId, secondInterviewerId, scheduledDate y scheduledTime son requeridos'
+    });
+  }
+
+  // Combinar fecha y hora
+  const fullDateTime = `${scheduledDate}T${scheduledTime}:00`;
+  const inputDate = new Date(fullDateTime);
+
+  if (isNaN(inputDate.getTime())) {
+    return res.status(400).json({
+      success: false,
+      error: 'Formato de fecha/hora inválido'
+    });
+  }
+
+  // Crear fecha normalizada para PostgreSQL
+  const year = inputDate.getFullYear();
+  const month = String(inputDate.getMonth() + 1).padStart(2, '0');
+  const day = String(inputDate.getDate()).padStart(2, '0');
+  const hours = String(inputDate.getHours()).padStart(2, '0');
+  const minutes = String(inputDate.getMinutes()).padStart(2, '0');
+  const seconds = String(inputDate.getSeconds()).padStart(2, '0');
+  const normalizedScheduledDate = `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+
+  const client = await dbPool.connect();
+  try {
+    // Verificar disponibilidad del primer entrevistador
+    const firstConflictQuery = `
+      SELECT id, scheduled_date, status, interviewer_id, second_interviewer_id
+      FROM interviews
+      WHERE (interviewer_id = $1 OR second_interviewer_id = $1)
+        AND scheduled_date = $2
+        AND status IN ('SCHEDULED', 'CONFIRMED', 'IN_PROGRESS')
+    `;
+
+    const firstConflictResult = await client.query(firstConflictQuery, [
+      parseInt(firstInterviewerId),
+      normalizedScheduledDate
+    ]);
+
+    const firstAvailable = firstConflictResult.rows.length === 0;
+
+    // Verificar disponibilidad del segundo entrevistador
+    const secondConflictQuery = `
+      SELECT id, scheduled_date, status, interviewer_id, second_interviewer_id
+      FROM interviews
+      WHERE (interviewer_id = $1 OR second_interviewer_id = $1)
+        AND scheduled_date = $2
+        AND status IN ('SCHEDULED', 'CONFIRMED', 'IN_PROGRESS')
+    `;
+
+    const secondConflictResult = await client.query(secondConflictQuery, [
+      parseInt(secondInterviewerId),
+      normalizedScheduledDate
+    ]);
+
+    const secondAvailable = secondConflictResult.rows.length === 0;
+
+    // Obtener nombres de entrevistadores para respuesta
+    const interviewersQuery = `
+      SELECT id, first_name, last_name, email, role
+      FROM users
+      WHERE id = ANY($1)
+    `;
+
+    const interviewersResult = await client.query(interviewersQuery, [
+      [parseInt(firstInterviewerId), parseInt(secondInterviewerId)]
+    ]);
+
+    const firstInterviewer = interviewersResult.rows.find(u => u.id == firstInterviewerId);
+    const secondInterviewer = interviewersResult.rows.find(u => u.id == secondInterviewerId);
+
+    // Respuesta con información detallada
+    const response = {
+      success: true,
+      bothAvailable: firstAvailable && secondAvailable,
+      firstInterviewer: {
+        id: parseInt(firstInterviewerId),
+        name: firstInterviewer ? `${firstInterviewer.first_name} ${firstInterviewer.last_name}` : 'Desconocido',
+        available: firstAvailable,
+        conflict: firstConflictResult.rows.length > 0 ? {
+          interviewId: firstConflictResult.rows[0].id,
+          scheduledDate: firstConflictResult.rows[0].scheduled_date,
+          status: firstConflictResult.rows[0].status
+        } : null
+      },
+      secondInterviewer: {
+        id: parseInt(secondInterviewerId),
+        name: secondInterviewer ? `${secondInterviewer.first_name} ${secondInterviewer.last_name}` : 'Desconocido',
+        available: secondAvailable,
+        conflict: secondConflictResult.rows.length > 0 ? {
+          interviewId: secondConflictResult.rows[0].id,
+          scheduledDate: secondConflictResult.rows[0].scheduled_date,
+          status: secondConflictResult.rows[0].status
+        } : null
+      },
+      requestedSlot: {
+        date: scheduledDate,
+        time: scheduledTime,
+        duration: parseInt(duration),
+        normalizedDateTime: normalizedScheduledDate
+      }
+    };
+
+    console.log('✅ Dual availability check result:', response);
+
+    res.json(response);
+
+  } catch (error) {
+    console.error('❌ Error checking dual availability:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error verificando disponibilidad conjunta',
       details: error.message
     });
   } finally {
@@ -3264,11 +3609,8 @@ app.get('/api/interviews/metadata/enums', (req, res) => {
 
   const enums = {
     interviewTypes: [
-      { value: 'INDIVIDUAL', label: 'Entrevista Individual', description: 'Entrevista con el estudiante' },
       { value: 'FAMILY', label: 'Entrevista Familiar', description: 'Entrevista con la familia' },
-      { value: 'PSYCHOLOGICAL', label: 'Evaluación Psicológica', description: 'Evaluación psicológica del estudiante' },
-      { value: 'ACADEMIC', label: 'Evaluación Académica', description: 'Evaluación académica y de conocimientos' },
-      { value: 'BEHAVIORAL', label: 'Evaluación Conductual', description: 'Evaluación de comportamiento y adaptación' }
+      { value: 'CYCLE_DIRECTOR', label: 'Entrevista Director de Ciclo', description: 'Entrevista con el director de ciclo' }
     ],
     interviewModes: [
       { value: 'PRESENTIAL', label: 'Presencial', description: 'Entrevista en las instalaciones del colegio' },
@@ -3285,10 +3627,9 @@ app.get('/api/interviews/metadata/enums', (req, res) => {
       { value: 'RESCHEDULED', label: 'Reprogramada', description: 'Entrevista reprogramada' }
     ],
     userRoles: [
-      { value: 'TEACHER', label: 'Profesor', canInterview: ['INDIVIDUAL', 'ACADEMIC'] },
-      { value: 'COORDINATOR', label: 'Coordinador', canInterview: ['INDIVIDUAL', 'FAMILY', 'ACADEMIC'] },
-      { value: 'PSYCHOLOGIST', label: 'Psicólogo', canInterview: ['INDIVIDUAL', 'FAMILY', 'PSYCHOLOGICAL', 'BEHAVIORAL'] },
-      { value: 'CYCLE_DIRECTOR', label: 'Director de Ciclo', canInterview: ['INDIVIDUAL', 'FAMILY', 'ACADEMIC', 'BEHAVIORAL'] }
+      { value: 'COORDINATOR', label: 'Coordinador', canInterview: ['FAMILY'] },
+      { value: 'PSYCHOLOGIST', label: 'Psicólogo', canInterview: ['FAMILY'] },
+      { value: 'CYCLE_DIRECTOR', label: 'Director de Ciclo', canInterview: ['FAMILY', 'CYCLE_DIRECTOR'] }
     ]
   };
 
@@ -3565,7 +3906,7 @@ app.post('/api/interviews/application/:applicationId/send-summary', async (req, 
 
   const client = await dbPool.connect();
   try {
-    // 1. Verificar que todas las entrevistas requeridas estén agendadas
+    // 1. Verificar que haya al menos una entrevista agendada
     const allInterviewsQuery = await client.query(
       `SELECT
         i.id, i.interview_type, i.scheduled_date, i.duration_minutes, i.location,
@@ -3577,22 +3918,19 @@ app.post('/api/interviews/application/:applicationId/send-summary', async (req, 
       [parseInt(applicationId)]
     );
 
-    const requiredTypes = ['INDIVIDUAL', 'FAMILY', 'PSYCHOLOGICAL'];
-    const scheduledTypes = allInterviewsQuery.rows.map(r => r.interview_type);
-    const allRequiredScheduled = requiredTypes.every(type => scheduledTypes.includes(type));
-
-    if (!allRequiredScheduled) {
-      const missingTypes = requiredTypes.filter(type => !scheduledTypes.includes(type));
+    // Verificar que haya al menos una entrevista agendada
+    if (allInterviewsQuery.rows.length === 0) {
       return res.status(400).json({
         success: false,
-        error: 'No todas las entrevistas requeridas están agendadas',
+        error: 'No hay entrevistas agendadas para esta aplicación',
         details: {
-          required: requiredTypes,
-          scheduled: scheduledTypes,
-          missing: missingTypes
+          applicationId,
+          scheduledCount: 0
         }
       });
     }
+
+    console.log(`✅ Encontradas ${allInterviewsQuery.rows.length} entrevistas agendadas para aplicación ${applicationId}`);
 
     // 2. Obtener datos del estudiante y apoderado (usuario que creó la aplicación)
     const studentQuery = await client.query(
