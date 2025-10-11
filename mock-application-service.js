@@ -1732,6 +1732,9 @@ app.get('/api/applications/:id', async (req, res) => {
         s.admission_preference as student_admission_preference,
         s.email as student_email,
         s.additional_notes as student_notes,
+        s.pais as student_pais,
+        s.region as student_region,
+        s.comuna as student_comuna,
 
         -- Father information
         f.id as father_id,
@@ -1863,7 +1866,11 @@ app.get('/api/applications/:id', async (req, res) => {
         address: row.student_address || 'Dirección no especificada',
         email: row.student_email,
         notes: row.student_notes,
-        age: row.student_birth_date ? new Date().getFullYear() - new Date(row.student_birth_date).getFullYear() : null
+        age: row.student_birth_date ? new Date().getFullYear() - new Date(row.student_birth_date).getFullYear() : null,
+        pais: row.student_pais || 'Chile',
+        region: row.student_region,
+        comuna: row.student_comuna,
+        admissionPreference: row.student_admission_preference || 'NINGUNA'
       },
       
       // Parents information
@@ -1982,13 +1989,25 @@ app.post('/api/applications', authenticateToken, validateApplicationInput, async
         ));
       }
 
+      // Validate location fields for Chile
+      const pais = body.pais || 'Chile';
+      if (pais === 'Chile') {
+        if (!body.region || !body.comuna) {
+          await client.query('ROLLBACK');
+          return res.status(400).json(fail(
+            'Region y comuna son obligatorios para Chile',
+            { errorCode: 'APP_003', details: { field: 'location', pais, region: body.region, comuna: body.comuna } }
+          ));
+        }
+      }
+
       // Insert student using flat structure from frontend
       const studentQuery = `
         INSERT INTO students (
           first_name, paternal_last_name, maternal_last_name, rut,
           birth_date, grade_applied, current_school, address,
-          email, school_applied, admission_preference, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
+          email, school_applied, admission_preference, pais, region, comuna, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW(), NOW())
         RETURNING id
       `;
 
@@ -2003,7 +2022,10 @@ app.post('/api/applications', authenticateToken, validateApplicationInput, async
         body.studentAddress || null,
         body.studentEmail || null,
         body.schoolApplied || 'MONTE_TABOR', // default school
-        body.admissionPreference || 'NINGUNA' // admission preference
+        body.admissionPreference || 'NINGUNA', // admission preference
+        pais, // country
+        body.region || null, // region (required for Chile)
+        body.comuna || null // comuna (required for Chile)
       ]);
 
       const studentId = studentResult.rows[0].id;
@@ -2176,7 +2198,11 @@ app.post('/api/applications', authenticateToken, validateApplicationInput, async
           gradeApplied: body.grade,
           currentSchool: body.currentSchool,
           address: body.studentAddress,
-          email: body.studentEmail
+          email: body.studentEmail,
+          pais: pais,
+          region: body.region || null,
+          comuna: body.comuna || null,
+          admissionPreference: body.admissionPreference || 'NINGUNA'
         },
         father: body.parent1Name ? {
           id: fatherId,
