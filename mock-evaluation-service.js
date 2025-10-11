@@ -77,19 +77,19 @@ const writeOperationBreaker = new CircuitBreaker(
 // Event listeners for all breakers
 const setupBreakerEvents = (breaker, name) => {
   breaker.on('open', () => {
-    console.error(`⚠️ [Circuit Breaker ${name}] OPEN - Too many failures in evaluation service`);
+    logger.error(`⚠️ [Circuit Breaker ${name}] OPEN - Too many failures in evaluation service`);
   });
 
   breaker.on('halfOpen', () => {
-    console.warn(`🔄 [Circuit Breaker ${name}] HALF-OPEN - Testing recovery`);
+    logger.warn(`🔄 [Circuit Breaker ${name}] HALF-OPEN - Testing recovery`);
   });
 
   breaker.on('close', () => {
-    console.log(`✅ [Circuit Breaker ${name}] CLOSED - Evaluation service recovered`);
+    logger.info(`✅ [Circuit Breaker ${name}] CLOSED - Evaluation service recovered`);
   });
 
   breaker.on('failure', (error) => {
-    console.error(`💥 [Circuit Breaker ${name}] FAILURE - Actual error:`, error.message);
+    logger.error(`💥 [Circuit Breaker ${name}] FAILURE - Actual error:`, error.message);
   });
 
   breaker.fallback(() => {
@@ -180,10 +180,10 @@ const evaluationCache = new SimpleCache();
 function translateInterview(interview) {
   if (!interview) return interview;
 
+  // DO NOT translate status or type - frontend expects English enum values
   return {
-    ...interview,
-    status: translateToSpanish(interview.status, 'interview_status')
-    // DO NOT translate type - frontend expects English enum values
+    ...interview
+    // status: translateToSpanish(interview.status, 'interview_status')
     // type: translateToSpanish(interview.type, 'interview_type')
   };
 }
@@ -234,7 +234,7 @@ setInterval(() => {
     }
   }
   if (cleaned > 0) {
-    console.log(`[Cache] Cleaned ${cleaned} expired entries`);
+    logger.info(`[Cache] Cleaned ${cleaned} expired entries`);
   }
 }, 300000);
 
@@ -314,7 +314,8 @@ function getSubjectFromEvaluationType(evaluationType) {
     'ENGLISH_EXAM': 'ENGLISH',
     'SCIENCE_EXAM': 'SCIENCE',
     'HISTORY_EXAM': 'HISTORY',
-    'PSYCHOLOGICAL_INTERVIEW': 'PSYCHOLOGY'
+    'PSYCHOLOGICAL_INTERVIEW': 'PSYCHOLOGY',
+    'FAMILY_INTERVIEW': 'GENERAL'
   };
   return typeMap[evaluationType] || 'GENERAL';
 }
@@ -338,7 +339,8 @@ function getSubjectDisplayName(evaluationType, professorSubject) {
     'ENGLISH_EXAM': 'Inglés',
     'SCIENCE_EXAM': 'Ciencias Naturales',
     'HISTORY_EXAM': 'Historia y Geografía',
-    'PSYCHOLOGICAL_INTERVIEW': 'Evaluación Psicológica'
+    'PSYCHOLOGICAL_INTERVIEW': 'Evaluación Psicológica',
+    'FAMILY_INTERVIEW': 'Entrevista Familiar'
   };
   return typeNames[evaluationType] || 'Evaluación General';
 }
@@ -371,7 +373,7 @@ app.get('/health', (req, res) => {
 app.get('/api/evaluations', async (req, res) => {
   const client = await dbPool.connect();
   try {
-    console.log('📊 Getting ALL evaluations from database (including Alejandra Flores)');
+    logger.info('📊 Getting ALL evaluations from database (including Alejandra Flores)');
 
     // Query all evaluations with evaluator and student information
     const result = await mediumQueryBreaker.fire(client, `
@@ -435,7 +437,7 @@ app.get('/api/evaluations', async (req, res) => {
       applicationStatus: row.application_status
     }));
 
-    console.log(`✅ Found ${evaluations.length} evaluations in database`);
+    logger.info(`✅ Found ${evaluations.length} evaluations in database`);
 
     res.json({
       success: true,
@@ -443,7 +445,7 @@ app.get('/api/evaluations', async (req, res) => {
       count: evaluations.length
     });
   } catch (error) {
-    console.error('❌ Error fetching evaluations:', error);
+    logger.error('❌ Error fetching evaluations:', error);
     res.status(500).json({
       success: false,
       error: 'Error al obtener evaluaciones',
@@ -458,7 +460,7 @@ app.get('/api/evaluations', async (req, res) => {
 // NOTE: This route MUST come BEFORE /api/evaluations/:evaluationId to avoid route conflicts
 app.get('/api/evaluations/metadata/types', async (req, res) => {
   try {
-    console.log('📋 Getting evaluation types metadata');
+    logger.info('📋 Getting evaluation types metadata');
 
     const evaluationTypes = [
       {
@@ -477,19 +479,9 @@ app.get('/api/evaluations/metadata/types', async (req, res) => {
         description: 'Evaluación de nivel de inglés'
       },
       {
-        code: 'PSYCHOLOGICAL_EVALUATION',
-        name: 'Evaluación Psicológica',
-        description: 'Evaluación del desarrollo emocional y social del estudiante'
-      },
-      {
-        code: 'INTERVIEW',
-        name: 'Entrevista',
-        description: 'Entrevista personal con estudiante y/o apoderados'
-      },
-      {
-        code: 'ENTRANCE_EXAM',
-        name: 'Examen de Admisión',
-        description: 'Examen general de admisión'
+        code: 'FAMILY_INTERVIEW',
+        name: 'Entrevista Familiar',
+        description: 'Evaluación integral de la familia y motivación para el ingreso'
       }
     ];
 
@@ -498,7 +490,7 @@ app.get('/api/evaluations/metadata/types', async (req, res) => {
       data: evaluationTypes
     });
   } catch (error) {
-    console.error('❌ Error getting evaluation types:', error);
+    logger.error('❌ Error getting evaluation types:', error);
     res.status(500).json({
       success: false,
       error: 'Error al obtener tipos de evaluación',
@@ -512,7 +504,7 @@ app.get('/api/evaluations/metadata/types', async (req, res) => {
 app.get('/api/evaluations/statistics', async (req, res) => {
   const client = await dbPool.connect();
   try {
-    console.log('📊 Getting evaluation statistics from database');
+    logger.info('📊 Getting evaluation statistics from database');
 
     // Total count
     const totalResult = await simpleQueryBreaker.fire(client,
@@ -599,11 +591,11 @@ app.get('/api/evaluations/statistics', async (req, res) => {
       completionRate: parseFloat(completionRate)
     };
 
-    console.log(`✅ Statistics calculated: ${totalEvaluations} total evaluations`);
+    logger.info(`✅ Statistics calculated: ${totalEvaluations} total evaluations`);
     res.json(ResponseHelper.ok(stats));
 
   } catch (error) {
-    console.error('❌ Error fetching evaluation statistics:', error);
+    logger.error('❌ Error fetching evaluation statistics:', error);
     res.status(500).json({
       success: false,
       error: 'Error al obtener estadísticas de evaluaciones',
@@ -619,7 +611,7 @@ app.get('/api/evaluations/statistics', async (req, res) => {
 app.get('/api/evaluations/public/statistics', async (req, res) => {
   const client = await dbPool.connect();
   try {
-    console.log('📊 Getting evaluation statistics from database (public)');
+    logger.info('📊 Getting evaluation statistics from database (public)');
 
     // Total count
     const totalResult = await simpleQueryBreaker.fire(client,
@@ -706,11 +698,11 @@ app.get('/api/evaluations/public/statistics', async (req, res) => {
       completionRate: parseFloat(completionRate)
     };
 
-    console.log(`✅ Public statistics calculated: ${totalEvaluations} total evaluations`);
+    logger.info(`✅ Public statistics calculated: ${totalEvaluations} total evaluations`);
     res.json(ResponseHelper.ok(stats));
 
   } catch (error) {
-    console.error('❌ Error fetching public evaluation statistics:', error);
+    logger.error('❌ Error fetching public evaluation statistics:', error);
     res.status(500).json({
       success: false,
       error: 'Error al obtener estadísticas públicas de evaluaciones',
@@ -775,16 +767,16 @@ const interviewers = [
 
 // Endpoint público para obtener entrevistadores disponibles
 app.get('/api/interviews/public/interviewers', async (req, res) => {
-  console.log('📋 Solicitud de entrevistadores disponibles');
+  logger.info('📋 Solicitud de entrevistadores disponibles');
 
   // Check cache first
   const cacheKey = 'interviews:public:interviewers';
   const cached = evaluationCache.get(cacheKey);
   if (cached) {
-    console.log('[Cache HIT] interviews:public:interviewers');
+    logger.info('[Cache HIT] interviews:public:interviewers');
     return res.json(cached);
   }
-  console.log('[Cache MISS] interviews:public:interviewers');
+  logger.info('[Cache MISS] interviews:public:interviewers');
 
   const client = await dbPool.connect();
   try {
@@ -819,14 +811,14 @@ app.get('/api/interviews/public/interviewers', async (req, res) => {
       scheduleCount: parseInt(row.schedule_count)
     }));
 
-    console.log(`✅ Encontrados ${activeInterviewers.length} entrevistadores activos`);
+    logger.info(`✅ Encontrados ${activeInterviewers.length} entrevistadores activos`);
 
     // Cache before sending response (5 minutes)
     evaluationCache.set(cacheKey, activeInterviewers, 300000);
     res.json(activeInterviewers);
 
   } catch (error) {
-    console.error('❌ Error obteniendo entrevistadores:', error);
+    logger.error('❌ Error obteniendo entrevistadores:', error);
 
     // Como fallback, usar datos mockeados
     const activeInterviewers = interviewers.filter(interviewer => interviewer.scheduleCount > 0);
@@ -838,7 +830,7 @@ app.get('/api/interviews/public/interviewers', async (req, res) => {
 
 // Endpoint público para obtener información completa de entrevistas
 app.get('/api/interviews/public/complete', (req, res) => {
-  console.log('📋 Solicitud de información completa de entrevistas');
+  logger.info('📋 Solicitud de información completa de entrevistas');
   
   // Combinar entrevistas con información de entrevistadores y estudiantes
   const completeInterviews = interviews.map(interview => {
@@ -898,7 +890,7 @@ app.get('/api/interviews/public/complete', (req, res) => {
 
 // Endpoint para obtener estudiantes disponibles para programar entrevistas
 app.get('/api/interviews/students', async (req, res) => {
-  console.log('👥 Solicitud de estudiantes disponibles para entrevistas');
+  logger.info('👥 Solicitud de estudiantes disponibles para entrevistas');
 
   try {
     // Obtener aplicaciones desde el servicio de aplicaciones
@@ -927,7 +919,7 @@ app.get('/api/interviews/students', async (req, res) => {
       }))
       .sort((a, b) => a.lastName.localeCompare(b.lastName));
 
-    console.log(`✅ Enviando ${availableStudents.length} estudiantes disponibles`);
+    logger.info(`✅ Enviando ${availableStudents.length} estudiantes disponibles`);
 
     res.json({
       success: true,
@@ -936,7 +928,7 @@ app.get('/api/interviews/students', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Error obteniendo estudiantes:', error);
+    logger.error('❌ Error obteniendo estudiantes:', error);
 
     // Fallback con datos mock si falla la conexión con aplicaciones
     const mockStudents = [
@@ -981,7 +973,7 @@ app.get('/api/interviews/students', async (req, res) => {
 app.get('/api/interviews/available-slots', async (req, res) => {
   const { interviewerId, date, duration } = req.query;
 
-  console.log(`🕒 Solicitud de horarios disponibles para entrevistador ${interviewerId} en fecha ${date} con duración ${duration} minutos`);
+  logger.info(`🕒 Solicitud de horarios disponibles para entrevistador ${interviewerId} en fecha ${date} con duración ${duration} minutos`);
 
   const client = await dbPool.connect();
   try {
@@ -991,7 +983,7 @@ app.get('/api/interviews/available-slots', async (req, res) => {
       [parseInt(interviewerId)]
     );
 
-    console.log(`🔍 Entrevistador ${interviewerId} encontrado:`, interviewerQuery.rows.length > 0 ? interviewerQuery.rows[0] : 'NO');
+    logger.info(`🔍 Entrevistador ${interviewerId} encontrado:`, interviewerQuery.rows.length > 0 ? interviewerQuery.rows[0] : 'NO');
 
     if (interviewerQuery.rows.length === 0) {
       return res.status(404).json({
@@ -1007,7 +999,7 @@ app.get('/api/interviews/available-slots', async (req, res) => {
     const dayNames = ['SUNDAY', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY'];
     const dayName = dayNames[dayOfWeek];
 
-    console.log(`📅 Fecha solicitada: ${date}, dayOfWeek JS: ${dayOfWeek}, dayName: ${dayName}`);
+    logger.info(`📅 Fecha solicitada: ${date}, dayOfWeek JS: ${dayOfWeek}, dayName: ${dayName}`);
 
     // Obtener horarios configurados para el entrevistador en ese día
     const schedulesQuery = await client.query(
@@ -1021,7 +1013,7 @@ app.get('/api/interviews/available-slots', async (req, res) => {
       [parseInt(interviewerId), dayName]
     );
 
-    console.log(`📋 Horarios encontrados para interviewer_id=${interviewerId}, day=${dayName}: ${schedulesQuery.rows.length}`);
+    logger.info(`📋 Horarios encontrados para interviewer_id=${interviewerId}, day=${dayName}: ${schedulesQuery.rows.length}`);
 
     if (schedulesQuery.rows.length === 0) {
       // No hay horarios configurados para este día
@@ -1037,31 +1029,33 @@ app.get('/api/interviews/available-slots', async (req, res) => {
     }
 
     // Obtener entrevistas ya agendadas para este entrevistador en esta fecha
+    // 🔒 IMPORTANTE: Verificar TANTO interviewer_id COMO second_interviewer_id
+    // para evitar conflictos de horarios cuando un profesor está en entrevistas familiares
     const occupiedQuery = await client.query(
       `SELECT DATE(scheduled_date) as date,
               TO_CHAR(scheduled_date, 'HH24:MI') as time,
               duration_minutes
        FROM interviews
-       WHERE interviewer_id = $1
+       WHERE (interviewer_id = $1 OR second_interviewer_id = $1)
          AND DATE(scheduled_date) = $2
          AND status IN ('SCHEDULED', 'CONFIRMED', 'IN_PROGRESS')`,
       [parseInt(interviewerId), date]
     );
 
     const occupiedSlots = new Set(occupiedQuery.rows.map(row => row.time));
-    console.log(`📅 Slots ocupados para ${date}:`, Array.from(occupiedSlots));
+    logger.info(`📅 Slots ocupados para entrevistador ${interviewerId} en ${date}:`, Array.from(occupiedSlots));
 
     // Generar slots disponibles basados en horarios reales
     const availableSlots = [];
     const slotDuration = parseInt(duration) || 30; // Default 30 minutos
 
-    console.log(`📋 Horarios encontrados en BD: ${schedulesQuery.rows.length}`);
+    logger.info(`📋 Horarios encontrados en BD: ${schedulesQuery.rows.length}`);
 
     for (const schedule of schedulesQuery.rows) {
       const startTime = schedule.start_time; // formato "HH:MM:SS"
       const slotTime = startTime.substring(0, 5); // "HH:MM"
 
-      console.log(`🔍 Revisando slot ${slotTime} - ocupado: ${occupiedSlots.has(slotTime)}`);
+      logger.info(`🔍 Revisando slot ${slotTime} - ocupado: ${occupiedSlots.has(slotTime)}`);
 
       // Verificar si el slot está ocupado
       if (!occupiedSlots.has(slotTime)) {
@@ -1073,7 +1067,7 @@ app.get('/api/interviews/available-slots', async (req, res) => {
       }
     }
 
-    console.log(`✅ Slots disponibles encontrados: ${availableSlots.length}`);
+    logger.info(`✅ Slots disponibles encontrados: ${availableSlots.length}`);
 
     res.json({
       success: true,
@@ -1085,7 +1079,7 @@ app.get('/api/interviews/available-slots', async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error obteniendo slots disponibles:', error);
+    logger.error('Error obteniendo slots disponibles:', error);
     res.status(500).json({
       success: false,
       error: 'Error interno del servidor',
@@ -1100,7 +1094,7 @@ app.get('/api/interviews/available-slots', async (req, res) => {
 app.get('/api/interviews/interviewer-availability', async (req, res) => {
   const { interviewerId, startDate, endDate } = req.query;
 
-  console.log(`📅 Solicitud de disponibilidad para entrevistador ${interviewerId} desde ${startDate} hasta ${endDate}`);
+  logger.info(`📅 Solicitud de disponibilidad para entrevistador ${interviewerId} desde ${startDate} hasta ${endDate}`);
 
   const client = await dbPool.connect();
   try {
@@ -1221,7 +1215,7 @@ app.get('/api/interviews/interviewer-availability', async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error obteniendo disponibilidad del entrevistador:', error);
+    logger.error('Error obteniendo disponibilidad del entrevistador:', error);
     res.status(500).json({
       success: false,
       error: 'Error interno del servidor',
@@ -1269,6 +1263,7 @@ app.post('/api/interviews', async (req, res) => {
   const {
     applicationId,
     interviewerId,
+    secondInterviewerId,  // Segundo entrevistador (opcional, requerido para FAMILY)
     scheduledDate,
     scheduledTime,  // Añadir scheduledTime
     duration,
@@ -1278,7 +1273,7 @@ app.post('/api/interviews', async (req, res) => {
     notes
   } = req.body;
 
-  console.log('📝 Creando nueva entrevista:', req.body);
+  logger.info('📝 Creando nueva entrevista:', req.body);
 
   // Validar datos requeridos
   if (!applicationId || !interviewerId || !scheduledDate || !type) {
@@ -1288,8 +1283,16 @@ app.post('/api/interviews', async (req, res) => {
     });
   }
 
-  // Validar tipos permitidos según DB constraints
-  const validInterviewTypes = ['INDIVIDUAL', 'FAMILY', 'PSYCHOLOGICAL', 'ACADEMIC', 'BEHAVIORAL'];
+  // Validar segundo entrevistador para entrevistas FAMILY
+  if (type === 'FAMILY' && !secondInterviewerId) {
+    return res.status(400).json({
+      success: false,
+      error: 'Las entrevistas familiares requieren un segundo entrevistador'
+    });
+  }
+
+  // Validar tipos permitidos según DB constraints (solo FAMILY y CYCLE_DIRECTOR)
+  const validInterviewTypes = ['FAMILY', 'CYCLE_DIRECTOR'];
   if (!validInterviewTypes.includes(type)) {
     return res.status(400).json({
       success: false,
@@ -1318,7 +1321,7 @@ app.post('/api/interviews', async (req, res) => {
     if (scheduledTime) {
       // scheduledDate viene como YYYY-MM-DD y scheduledTime como HH:MM
       fullDateTime = `${scheduledDate}T${scheduledTime}:00`;
-      console.log('📅 Combinando fecha y hora:', {
+      logger.info('📅 Combinando fecha y hora:', {
         date: scheduledDate,
         time: scheduledTime,
         combined: fullDateTime
@@ -1355,7 +1358,7 @@ app.post('/api/interviews', async (req, res) => {
     const seconds = String(inputDate.getSeconds()).padStart(2, '0');
     normalizedScheduledDate = `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
 
-    console.log('📅 Fecha normalizada:', {
+    logger.info('📅 Fecha normalizada:', {
       original: scheduledDate,
       time: scheduledTime,
       combined: fullDateTime,
@@ -1375,7 +1378,7 @@ app.post('/api/interviews', async (req, res) => {
   let clientReleased = false;
   try {
     // ✅ VALIDACIÓN 1: Verificar que no exista una entrevista activa del mismo tipo
-    console.log(`🔍 Verificando si existe entrevista ${type} para aplicación ${applicationId}...`);
+    logger.info(`🔍 Verificando si existe entrevista ${type} para aplicación ${applicationId}...`);
     const existingInterviewQuery = await client.query(
       `SELECT id, interview_type, status, scheduled_date
        FROM interviews
@@ -1389,14 +1392,11 @@ app.post('/api/interviews', async (req, res) => {
     if (existingInterviewQuery.rows.length > 0) {
       const existing = existingInterviewQuery.rows[0];
       const typeLabels = {
-        'INDIVIDUAL': 'Individual',
         'FAMILY': 'Familiar',
-        'PSYCHOLOGICAL': 'Psicológica',
-        'ACADEMIC': 'Académica',
-        'BEHAVIORAL': 'Conductual'
+        'CYCLE_DIRECTOR': 'Director de Ciclo'
       };
 
-      console.log(`❌ Ya existe entrevista ${type} activa (ID: ${existing.id})`);
+      logger.info(`❌ Ya existe entrevista ${type} activa (ID: ${existing.id})`);
 
       client.release();
       clientReleased = true;
@@ -1414,13 +1414,14 @@ app.post('/api/interviews', async (req, res) => {
       });
     }
 
-    console.log(`✅ No existe entrevista ${type} activa, continuando...`);
+    logger.info(`✅ No existe entrevista ${type} activa, continuando...`);
 
-    // 🔒 VALIDACIÓN 2: Verificar que el slot no esté ocupado
+    // 🔒 VALIDACIÓN 2: Verificar que el slot no esté ocupado para AMBOS entrevistadores
+    // Para entrevistas FAMILY, necesitamos verificar que AMBOS entrevistadores estén disponibles
     const conflictQuery = `
-      SELECT id, scheduled_date, status
+      SELECT id, scheduled_date, status, interviewer_id, second_interviewer_id
       FROM interviews
-      WHERE interviewer_id = $1
+      WHERE (interviewer_id = $1 OR second_interviewer_id = $1)
         AND scheduled_date = $2
         AND status IN ('SCHEDULED', 'CONFIRMED', 'IN_PROGRESS')
     `;
@@ -1432,12 +1433,12 @@ app.post('/api/interviews', async (req, res) => {
 
     if (conflictResult.rows.length > 0) {
       const existingInterview = conflictResult.rows[0];
-      console.log('❌ CONFLICTO DE HORARIO detectado:', existingInterview);
+      logger.info('❌ CONFLICTO DE HORARIO detectado para primer entrevistador:', existingInterview);
 
       return res.status(409).json({
         success: false,
         error: 'SLOT_ALREADY_TAKEN',
-        message: 'Este horario ya está reservado. Por favor seleccione otro horario.',
+        message: 'El primer entrevistador ya tiene una entrevista programada en este horario. Por favor seleccione otro horario.',
         details: {
           interviewerId: interviewerId,
           scheduledDate: normalizedScheduledDate,
@@ -1447,13 +1448,51 @@ app.post('/api/interviews', async (req, res) => {
       });
     }
 
-    console.log('✅ Slot disponible, procediendo con la creación...');
+    logger.info('✅ Primer entrevistador disponible');
+
+    // Si es entrevista FAMILY, también verificar disponibilidad del segundo entrevistador
+    if (type === 'FAMILY' && secondInterviewerId) {
+      const secondConflictQuery = `
+        SELECT id, scheduled_date, status, interviewer_id, second_interviewer_id
+        FROM interviews
+        WHERE (interviewer_id = $1 OR second_interviewer_id = $1)
+          AND scheduled_date = $2
+          AND status IN ('SCHEDULED', 'CONFIRMED', 'IN_PROGRESS')
+      `;
+
+      const secondConflictResult = await client.query(secondConflictQuery, [
+        parseInt(secondInterviewerId),
+        normalizedScheduledDate
+      ]);
+
+      if (secondConflictResult.rows.length > 0) {
+        const existingInterview = secondConflictResult.rows[0];
+        logger.info('❌ CONFLICTO DE HORARIO detectado para segundo entrevistador:', existingInterview);
+
+        return res.status(409).json({
+          success: false,
+          error: 'SECOND_INTERVIEWER_SLOT_TAKEN',
+          message: 'El segundo entrevistador ya tiene una entrevista programada en este horario. Por favor seleccione otro horario u otro entrevistador.',
+          details: {
+            secondInterviewerId: secondInterviewerId,
+            scheduledDate: normalizedScheduledDate,
+            existingInterviewId: existingInterview.id,
+            existingStatus: existingInterview.status
+          }
+        });
+      }
+
+      logger.info('✅ Segundo entrevistador disponible');
+    }
+
+    logger.info('✅ Slot disponible para ambos entrevistadores, procediendo con la creación...');
 
     // Insertar la nueva entrevista en la base de datos
     const insertQuery = `
       INSERT INTO interviews (
         application_id,
         interviewer_id,
+        second_interviewer_id,
         scheduled_date,
         duration_minutes,
         interview_type,
@@ -1463,8 +1502,9 @@ app.post('/api/interviews', async (req, res) => {
         location,
         created_at,
         updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
       RETURNING id, application_id as "applicationId", interviewer_id as "interviewerId",
+               second_interviewer_id as "secondInterviewerId",
                scheduled_date as "scheduledDate", duration_minutes as duration,
                interview_type as type, interview_mode as mode, status, notes, location,
                created_at as "createdAt", updated_at as "updatedAt"
@@ -1473,6 +1513,7 @@ app.post('/api/interviews', async (req, res) => {
     const values = [
       parseInt(applicationId),
       parseInt(interviewerId),
+      secondInterviewerId ? parseInt(secondInterviewerId) : null,
       normalizedScheduledDate,
       parseInt(duration) || 60,
       type,
@@ -1482,13 +1523,13 @@ app.post('/api/interviews', async (req, res) => {
       location || 'Por asignar'
     ];
 
-    console.log('🗄️ Ejecutando query INSERT:', insertQuery);
-    console.log('📊 Valores:', values);
+    logger.info('🗄️ Ejecutando query INSERT:', insertQuery);
+    logger.info('📊 Valores:', values);
 
     const result = await client.query(insertQuery, values);
     const newInterview = result.rows[0];
 
-    console.log('✅ Entrevista creada exitosamente:', newInterview);
+    logger.info('✅ Entrevista creada exitosamente:', newInterview);
 
     // 📊 PASO 2: Obtener datos completos para respuesta (studentName, interviewerName, etc.)
     const fullDataQuery = `
@@ -1496,6 +1537,7 @@ app.post('/api/interviews', async (req, res) => {
         i.id,
         i.application_id as "applicationId",
         i.interviewer_id as "interviewerId",
+        i.second_interviewer_id as "secondInterviewerId",
         i.scheduled_date as "scheduledDate",
         i.duration_minutes as duration,
         i.interview_type as type,
@@ -1507,19 +1549,21 @@ app.post('/api/interviews', async (req, res) => {
         CONCAT(s.first_name, ' ', s.paternal_last_name, ' ', COALESCE(s.maternal_last_name, '')) as "studentName",
         g.full_name as "parentNames",
         s.grade_applied as "gradeApplied",
-        CONCAT(u.first_name, ' ', u.last_name) as "interviewerName"
+        CONCAT(u.first_name, ' ', u.last_name) as "interviewerName",
+        CONCAT(u2.first_name, ' ', u2.last_name) as "secondInterviewerName"
       FROM interviews i
       JOIN applications a ON i.application_id = a.id
       JOIN students s ON a.student_id = s.id
       JOIN guardians g ON a.guardian_id = g.id
       JOIN users u ON i.interviewer_id = u.id
+      LEFT JOIN users u2 ON i.second_interviewer_id = u2.id
       WHERE i.id = $1
     `;
 
     const fullDataResult = await client.query(fullDataQuery, [newInterview.id]);
     const interviewData = fullDataResult.rows[0];
 
-    console.log('📋 Datos completos de entrevista para respuesta:', interviewData);
+    logger.info('📋 Datos completos de entrevista para respuesta:', interviewData);
 
     // También agregar al array en memoria para compatibilidad con otros endpoints
     interviews.push({
@@ -1540,6 +1584,11 @@ app.post('/api/interviews', async (req, res) => {
       gradeApplied: interviewData.gradeApplied
     });
 
+    // ============= CACHE INVALIDATION =============
+    // Invalidate interview-related caches after successful creation
+    const cleared = evaluationCache.clear('interviews:');
+    logger.info(`[Cache Invalidation] Cleared ${cleared} interview cache entries after interview creation (ID: ${newInterview.id})`);
+
     // PASO 3: Retornar respuesta inmediatamente
     res.status(201).json({
       id: parseInt(interviewData.id),
@@ -1549,6 +1598,8 @@ app.post('/api/interviews', async (req, res) => {
       gradeApplied: interviewData.gradeApplied,
       interviewerId: parseInt(interviewData.interviewerId),
       interviewerName: interviewData.interviewerName,
+      secondInterviewerId: interviewData.secondInterviewerId ? parseInt(interviewData.secondInterviewerId) : null,
+      secondInterviewerName: interviewData.secondInterviewerName || null,
       status: interviewData.status,
       type: interviewData.type,
       mode: mode || 'IN_PERSON',
@@ -1595,6 +1646,18 @@ app.post('/api/interviews', async (req, res) => {
           [parseInt(interviewerId)]
         );
 
+        // 📧 Si hay segundo entrevistador, obtener sus datos también
+        let secondInterviewerData = null;
+        if (secondInterviewerId) {
+          const secondInterviewerQuery = await notifClient.query(
+            `SELECT email, first_name, last_name
+             FROM users
+             WHERE id = $1`,
+            [parseInt(secondInterviewerId)]
+          );
+          secondInterviewerData = secondInterviewerQuery.rows[0];
+        }
+
         if (guardiansQuery.rows.length > 0) {
           const guardian = guardiansQuery.rows[0];
           const interviewer = interviewerQuery.rows[0];
@@ -1603,6 +1666,12 @@ app.post('/api/interviews', async (req, res) => {
           const interviewDate = new Date(newInterview.scheduledDate);
           const dateStr = interviewDate.toLocaleDateString('es-CL');
           const timeStr = interviewDate.toLocaleTimeString('es-CL', { hour: '2-digit', minute: '2-digit' });
+
+          // Preparar nombres de entrevistadores para el apoderado
+          let interviewersNames = interviewer ? `${interviewer.first_name} ${interviewer.last_name}` : 'Por confirmar';
+          if (secondInterviewerData) {
+            interviewersNames += ` y ${secondInterviewerData.first_name} ${secondInterviewerData.last_name}`;
+          }
 
           // Enviar email al apoderado (sin await para no bloquear)
           axios.post('http://localhost:8085/api/notifications/send', {
@@ -1616,12 +1685,12 @@ app.post('/api/interviews', async (req, res) => {
               interviewDate: dateStr,
               interviewTime: timeStr,
               location: newInterview.location,
-              interviewerName: interviewer ? `${interviewer.first_name} ${interviewer.last_name}` : 'Por confirmar',
+              interviewerName: interviewersNames,
               duration: newInterview.duration
             }
-          }).catch(err => console.error('Error enviando email a apoderado:', err.message));
+          }).catch(err => logger.error('Error enviando email a apoderado:', err.message));
 
-          // Enviar email al entrevistador (sin await para no bloquear)
+          // Enviar email al primer entrevistador (sin await para no bloquear)
           if (interviewer) {
             axios.post('http://localhost:8085/api/notifications/send', {
               to: interviewer.email,
@@ -1635,22 +1704,45 @@ app.post('/api/interviews', async (req, res) => {
                 interviewDate: dateStr,
                 interviewTime: timeStr,
                 location: newInterview.location,
-                duration: newInterview.duration
+                duration: newInterview.duration,
+                coInterviewer: secondInterviewerData ? `${secondInterviewerData.first_name} ${secondInterviewerData.last_name}` : null
               }
-            }).catch(err => console.error('Error enviando email a entrevistador:', err.message));
+            }).catch(err => logger.error('Error enviando email a entrevistador 1:', err.message));
           }
 
-          console.log('✅ Notificaciones iniciadas en segundo plano');
+          // 📧 Enviar email al segundo entrevistador si existe
+          if (secondInterviewerData) {
+            axios.post('http://localhost:8085/api/notifications/send', {
+              to: secondInterviewerData.email,
+              subject: `Nueva Entrevista Asignada - ${guardian.student_name} ${guardian.student_lastname}`,
+              type: 'interview_scheduled_interviewer',
+              data: {
+                interviewerName: `${secondInterviewerData.first_name} ${secondInterviewerData.last_name}`,
+                studentName: `${guardian.student_name} ${guardian.student_lastname}`,
+                guardianName: guardian.full_name,
+                interviewType: type,
+                interviewDate: dateStr,
+                interviewTime: timeStr,
+                location: newInterview.location,
+                duration: newInterview.duration,
+                coInterviewer: interviewer ? `${interviewer.first_name} ${interviewer.last_name}` : null
+              }
+            }).catch(err => logger.error('Error enviando email a entrevistador 2:', err.message));
+
+            logger.info(`📧 Email enviado a segundo entrevistador: ${secondInterviewerData.email}`);
+          }
+
+          logger.info(`✅ Notificaciones iniciadas en segundo plano (${secondInterviewerData ? '3 emails' : '2 emails'})`);
         }
       } catch (emailError) {
-        console.error('⚠️ Error preparando notificaciones:', emailError.message);
+        logger.error('⚠️ Error preparando notificaciones:', emailError.message);
       } finally {
         notifClient.release();
       }
     });
 
   } catch (error) {
-    console.error('❌ Error creando entrevista:', error);
+    logger.error('❌ Error creando entrevista:', error);
 
     // Manejar errores específicos de constraint violations
     if (error.message && error.message.includes('check constraint')) {
@@ -1695,9 +1787,9 @@ app.post('/api/interviews', async (req, res) => {
 
 // Endpoint para obtener entrevistas (con filtros)
 app.get('/api/interviews', async (req, res) => {
-  const { applicationId, interviewerId, status, date } = req.query;
+  const { applicationId, interviewerId, status, date, type, mode, startDate, endDate } = req.query;
 
-  console.log('📋 Obteniendo entrevistas con filtros:', req.query);
+  logger.info('📋 Obteniendo entrevistas con filtros:', req.query);
 
   const client = await dbPool.connect();
   try {
@@ -1706,6 +1798,7 @@ app.get('/api/interviews', async (req, res) => {
         i.id,
         i.application_id,
         i.interviewer_id,
+        i.second_interviewer_id,
         i.scheduled_date,
         i.duration_minutes,
         i.status,
@@ -1713,11 +1806,13 @@ app.get('/api/interviews', async (req, res) => {
         i.notes,
         i.created_at,
         s.first_name || ' ' || s.paternal_last_name as student_name,
-        u.first_name || ' ' || u.last_name as interviewer_name
+        u.first_name || ' ' || u.last_name as interviewer_name,
+        u2.first_name || ' ' || u2.last_name as second_interviewer_name
       FROM interviews i
       JOIN applications a ON a.id = i.application_id
       JOIN students s ON s.id = a.student_id
       JOIN users u ON u.id = i.interviewer_id
+      LEFT JOIN users u2 ON u2.id = i.second_interviewer_id
       WHERE 1=1
     `;
 
@@ -1732,7 +1827,8 @@ app.get('/api/interviews', async (req, res) => {
 
     if (interviewerId) {
       paramCount++;
-      query += ` AND i.interviewer_id = $${paramCount}`;
+      // Buscar entrevistas donde el usuario es el entrevistador principal O el segundo entrevistador
+      query += ` AND (i.interviewer_id = $${paramCount} OR i.second_interviewer_id = $${paramCount})`;
       params.push(parseInt(interviewerId));
     }
 
@@ -1742,10 +1838,31 @@ app.get('/api/interviews', async (req, res) => {
       params.push(status);
     }
 
+    if (type) {
+      paramCount++;
+      query += ` AND i.interview_type = $${paramCount}`;
+      params.push(type);
+    }
+
+    // Note: mode filter not implemented in DB yet, will be filtered in-memory
+    // This would require adding a 'mode' column to interviews table
+
     if (date) {
       paramCount++;
       query += ` AND DATE(i.scheduled_date) = $${paramCount}`;
       params.push(date);
+    }
+
+    if (startDate) {
+      paramCount++;
+      query += ` AND i.scheduled_date >= $${paramCount}`;
+      params.push(startDate);
+    }
+
+    if (endDate) {
+      paramCount++;
+      query += ` AND i.scheduled_date <= $${paramCount}`;
+      params.push(endDate);
     }
 
     query += ` ORDER BY i.scheduled_date`;
@@ -1769,6 +1886,7 @@ app.get('/api/interviews', async (req, res) => {
         id: row.id,
         applicationId: row.application_id,
         interviewerId: row.interviewer_id,
+        secondInterviewerId: row.second_interviewer_id,
         scheduledDate: localISOString,
         duration: row.duration_minutes,
         type: row.interview_type, // ✅ Usar el tipo real de la BD
@@ -1778,17 +1896,30 @@ app.get('/api/interviews', async (req, res) => {
         notes: row.notes || '',
         createdAt: row.created_at.toISOString(),
         studentName: row.student_name,
-        interviewerName: row.interviewer_name
+        interviewerName: row.interviewer_name,
+        secondInterviewerName: row.second_interviewer_name
       };
     });
 
-    // Traducir estados y tipos al español antes de devolver
-    const translatedInterviews = translateInterviews(formattedInterviews);
+    // Filtrar por mode si se especificó (filtro en memoria ya que no está en BD)
+    let finalInterviews = formattedInterviews;
+    if (mode) {
+      finalInterviews = formattedInterviews.filter(interview => interview.mode === mode);
+    }
 
-    // Return raw array (unwrapped) for QA test compatibility
-    res.json(translatedInterviews);
+    // Traducir estados y tipos al español antes de devolver
+    const translatedInterviews = translateInterviews(finalInterviews);
+
+    logger.info(`✅ Retornando ${translatedInterviews.length} entrevistas después de aplicar filtros`);
+
+    // Return wrapped format for frontend compatibility
+    res.json({
+      success: true,
+      data: translatedInterviews,
+      count: translatedInterviews.length
+    });
   } catch (error) {
-    console.error('Database error:', error);
+    logger.error('Database error:', error);
     // Fallback to mock data
     let filteredInterviews = [...interviews];
 
@@ -1797,7 +1928,11 @@ app.get('/api/interviews', async (req, res) => {
     }
 
     if (interviewerId) {
-      filteredInterviews = filteredInterviews.filter(i => i.interviewerId === parseInt(interviewerId));
+      // Buscar entrevistas donde el usuario es el entrevistador principal O el segundo entrevistador
+      filteredInterviews = filteredInterviews.filter(i =>
+        i.interviewerId === parseInt(interviewerId) ||
+        i.secondInterviewerId === parseInt(interviewerId)
+      );
     }
 
     if (status) {
@@ -1808,8 +1943,12 @@ app.get('/api/interviews', async (req, res) => {
       filteredInterviews = filteredInterviews.filter(i => i.scheduledDate.startsWith(date));
     }
 
-    // Return raw array (unwrapped) for QA test compatibility
-    res.json(filteredInterviews);
+    // Return wrapped format for frontend compatibility
+    res.json({
+      success: true,
+      data: filteredInterviews,
+      count: filteredInterviews.length
+    });
   } finally {
     client.release();
   }
@@ -1819,7 +1958,7 @@ app.get('/api/interviews', async (req, res) => {
 app.get('/api/interviews/calendar', async (req, res) => {
   const { startDate, endDate, interviewerId } = req.query;
   
-  console.log('📅 Obteniendo entrevistas para calendario:', { startDate, endDate, interviewerId });
+  logger.info('📅 Obteniendo entrevistas para calendario:', { startDate, endDate, interviewerId });
 
   const client = await dbPool.connect();
   try {
@@ -1894,30 +2033,30 @@ app.get('/api/interviews/calendar', async (req, res) => {
       params.push(endDate);
     }
 
-    // Filtrar por entrevistador si se especifica
+    // Filtrar por entrevistador si se especifica (principal O segundo entrevistador)
     if (interviewerId) {
       paramCount++;
-      query += ` AND i.interviewer_id = $${paramCount}`;
+      query += ` AND (i.interviewer_id = $${paramCount} OR i.second_interviewer_id = $${paramCount})`;
       params.push(parseInt(interviewerId));
     }
 
     query += ` ORDER BY i.scheduled_date ASC`;
 
-    console.log('🔍 Ejecutando query para calendario:', query);
-    console.log('📋 Parámetros:', params);
+    logger.info('🔍 Ejecutando query para calendario:', query);
+    logger.info('📋 Parámetros:', params);
 
     const result = await client.query(query, params);
     const calendarInterviews = result.rows;
 
-    console.log(`📊 Encontradas ${calendarInterviews.length} entrevistas para calendario`);
+    logger.info(`📊 Encontradas ${calendarInterviews.length} entrevistas para calendario`);
 
     res.json(calendarInterviews);
 
   } catch (error) {
-    console.error('❌ Error obteniendo entrevistas para calendario:', error);
+    logger.error('❌ Error obteniendo entrevistas para calendario:', error);
 
     // Fallback con datos mock para desarrollo
-    console.log('🔄 Usando datos mock de fallback para calendario');
+    logger.info('🔄 Usando datos mock de fallback para calendario');
 
     const mockInterviews = [
       {
@@ -2034,8 +2173,10 @@ app.get('/api/interviews/calendar', async (req, res) => {
     }
     
     if (interviewerId) {
-      filteredMockInterviews = filteredMockInterviews.filter(interview => 
-        interview.interviewerId === parseInt(interviewerId)
+      // Buscar entrevistas donde el usuario es el entrevistador principal O el segundo entrevistador
+      filteredMockInterviews = filteredMockInterviews.filter(interview =>
+        interview.interviewerId === parseInt(interviewerId) ||
+        interview.secondInterviewerId === parseInt(interviewerId)
       );
     }
 
@@ -2047,7 +2188,7 @@ app.get('/api/interviews/calendar', async (req, res) => {
 
 // Endpoint para obtener estadísticas de entrevistas (DEBE IR ANTES que el route parametrizado :id)
 app.get('/api/interviews/statistics', (req, res) => {
-  console.log('📊 Solicitud de estadísticas de entrevistas');
+  logger.info('📊 Solicitud de estadísticas de entrevistas');
   
   // Calcular estadísticas basadas en las entrevistas existentes
   const totalInterviews = interviews.length;
@@ -2159,7 +2300,7 @@ app.get('/api/interviews/statistics', (req, res) => {
 app.get('/api/interviews/availability', async (req, res) => {
   const { interviewerId, date, time, excludeInterviewId } = req.query;
 
-  console.log('🔍 Verificando disponibilidad preventiva:', { interviewerId, date, time, excludeInterviewId });
+  logger.info('🔍 Verificando disponibilidad preventiva:', { interviewerId, date, time, excludeInterviewId });
 
   if (!interviewerId || !date || !time) {
     return res.status(400).json({
@@ -2173,11 +2314,11 @@ app.get('/api/interviews/availability', async (req, res) => {
     // Construir fecha/hora en formato esperado por la DB
     const scheduledDateTime = `${date} ${time}:00`;
 
-    // Query para buscar conflictos
+    // 🔒 Query para buscar conflictos - verificar TANTO interviewer_id COMO second_interviewer_id
     const query = `
       SELECT id, status, scheduled_date
       FROM interviews
-      WHERE interviewer_id = $1
+      WHERE (interviewer_id = $1 OR second_interviewer_id = $1)
         AND scheduled_date = $2
         AND status IN ('SCHEDULED', 'CONFIRMED', 'IN_PROGRESS')
         ${excludeInterviewId ? 'AND id != $3' : ''}
@@ -2191,16 +2332,16 @@ app.get('/api/interviews/availability', async (req, res) => {
     const result = await client.query(query, params);
     const isAvailable = result.rows.length === 0;
 
-    console.log(`${isAvailable ? '✅' : '❌'} Slot ${isAvailable ? 'disponible' : 'ocupado'} para interviewer ${interviewerId} en ${scheduledDateTime}`);
+    logger.info(`${isAvailable ? '✅' : '❌'} Slot ${isAvailable ? 'disponible' : 'ocupado'} para interviewer ${interviewerId} en ${scheduledDateTime}`);
 
     if (!isAvailable) {
-      console.log('📋 Conflicto encontrado:', result.rows[0]);
+      logger.info('📋 Conflicto encontrado:', result.rows[0]);
     }
 
     // Retornar boolean directo (true = disponible, false = ocupado)
     res.json(isAvailable);
   } catch (error) {
-    console.error('Error verificando disponibilidad preventiva:', error);
+    logger.error('Error verificando disponibilidad preventiva:', error);
     res.status(500).json({
       success: false,
       error: 'Internal server error',
@@ -2233,7 +2374,7 @@ app.get('/api/interviews/:id', (req, res) => {
 app.put('/api/interviews/:id', async (req, res) => {
   const interviewId = parseInt(req.params.id);
 
-  console.log('✏️ Actualizando entrevista:', interviewId, req.body);
+  logger.info('✏️ Actualizando entrevista:', interviewId, req.body);
 
   const client = await dbPool.connect();
   try {
@@ -2278,7 +2419,7 @@ app.put('/api/interviews/:id', async (req, res) => {
         updateFields.push(`scheduled_date = $${paramCount}`);
         updateValues.push(normalizedDate);
 
-        console.log('📅 Actualizando fecha:', {
+        logger.info('📅 Actualizando fecha:', {
           date: req.body.scheduledDate,
           time: req.body.scheduledTime,
           combined: fullDateTime,
@@ -2317,6 +2458,12 @@ app.put('/api/interviews/:id', async (req, res) => {
       updateValues.push(req.body.interviewerId);
     }
 
+    if (req.body.secondInterviewerId !== undefined) {
+      paramCount++;
+      updateFields.push(`second_interviewer_id = $${paramCount}`);
+      updateValues.push(req.body.secondInterviewerId);
+    }
+
     // Agregar updated_at
     paramCount++;
     updateFields.push(`updated_at = $${paramCount}`);
@@ -2340,11 +2487,25 @@ app.put('/api/interviews/:id', async (req, res) => {
       RETURNING *
     `;
 
-    console.log('📝 Ejecutando actualización:', updateQuery, updateValues);
+    logger.info('📝 Ejecutando actualización:', updateQuery, updateValues);
     const result = await client.query(updateQuery, updateValues);
 
+    // Obtener los nombres de los entrevistadores desde la BD
+    const enrichedQuery = `
+      SELECT
+        i.*,
+        CONCAT(u.first_name, ' ', u.last_name) as interviewer_name,
+        CONCAT(u2.first_name, ' ', u2.last_name) as second_interviewer_name
+      FROM interviews i
+      JOIN users u ON i.interviewer_id = u.id
+      LEFT JOIN users u2 ON i.second_interviewer_id = u2.id
+      WHERE i.id = $1
+    `;
+    const enrichedResult = await client.query(enrichedQuery, [interviewId]);
+    const enrichedData = enrichedResult.rows[0];
+
     // Formatear fecha en zona horaria local (consistente con GET)
-    const localDate = new Date(result.rows[0].scheduled_date);
+    const localDate = new Date(enrichedData.scheduled_date);
     const year = localDate.getFullYear();
     const month = String(localDate.getMonth() + 1).padStart(2, '0');
     const day = String(localDate.getDate()).padStart(2, '0');
@@ -2353,24 +2514,32 @@ app.put('/api/interviews/:id', async (req, res) => {
     const seconds = String(localDate.getSeconds()).padStart(2, '0');
     const localISOString = `${year}-${month}-${day}T${hours}:${minutes}:${seconds}`;
 
+    // ============= CACHE INVALIDATION =============
+    // Invalidate interview-related caches after successful update
+    const cleared = evaluationCache.clear('interviews:');
+    logger.info(`[Cache Invalidation] Cleared ${cleared} interview cache entries after interview update (ID: ${interviewId})`);
+
     res.json({
       success: true,
       data: {
-        id: result.rows[0].id,
-        applicationId: result.rows[0].application_id,
-        interviewerId: result.rows[0].interviewer_id,
+        id: enrichedData.id,
+        applicationId: enrichedData.application_id,
+        interviewerId: enrichedData.interviewer_id,
+        interviewerName: enrichedData.interviewer_name,
+        secondInterviewerId: enrichedData.second_interviewer_id,
+        secondInterviewerName: enrichedData.second_interviewer_name,
         scheduledDate: localISOString,
-        duration: result.rows[0].duration_minutes,
-        type: result.rows[0].interview_type,
-        status: result.rows[0].status,
-        notes: result.rows[0].notes || '',
-        updatedAt: result.rows[0].updated_at.toISOString()
+        duration: enrichedData.duration_minutes,
+        type: enrichedData.interview_type,
+        status: enrichedData.status,
+        notes: enrichedData.notes || '',
+        updatedAt: enrichedData.updated_at.toISOString()
       },
       message: 'Entrevista actualizada exitosamente'
     });
 
   } catch (error) {
-    console.error('❌ Error actualizando entrevista en BD:', error);
+    logger.error('❌ Error actualizando entrevista en BD:', error);
     res.status(500).json({
       success: false,
       error: 'Error interno del servidor al actualizar la entrevista'
@@ -2381,34 +2550,67 @@ app.put('/api/interviews/:id', async (req, res) => {
 });
 
 // Endpoint para cancelar una entrevista
-app.delete('/api/interviews/:id', (req, res) => {
+app.delete('/api/interviews/:id', async (req, res) => {
   const interviewId = parseInt(req.params.id);
-  const interviewIndex = interviews.findIndex(i => i.id === interviewId);
 
-  if (interviewIndex === -1) {
-    return res.status(404).json({
-      success: false,
-      error: 'Entrevista no encontrada'
+  logger.info('🗑️ Eliminando entrevista:', interviewId);
+
+  const client = await dbPool.connect();
+  try {
+    // Verificar si la entrevista existe
+    const checkQuery = 'SELECT id, status FROM interviews WHERE id = $1';
+    const checkResult = await client.query(checkQuery, [interviewId]);
+
+    if (checkResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Entrevista no encontrada'
+      });
+    }
+
+    const interview = checkResult.rows[0];
+
+    // Solo permitir eliminar entrevistas canceladas (seguridad adicional)
+    if (interview.status !== 'CANCELLED') {
+      return res.status(400).json({
+        success: false,
+        error: 'Solo se pueden eliminar entrevistas canceladas. Por favor cancele la entrevista primero.'
+      });
+    }
+
+    // Eliminar la entrevista de la base de datos
+    const deleteQuery = 'DELETE FROM interviews WHERE id = $1';
+    await client.query(deleteQuery, [interviewId]);
+
+    logger.info('✅ Entrevista eliminada exitosamente:', interviewId);
+
+    // ============= CACHE INVALIDATION =============
+    // Invalidate interview-related caches after successful deletion
+    const cleared = evaluationCache.clear('interviews:');
+    logger.info(`[Cache Invalidation] Cleared ${cleared} interview cache entries after interview deletion (ID: ${interviewId})`);
+
+    res.json({
+      success: true,
+      message: 'Entrevista eliminada exitosamente'
     });
+
+  } catch (error) {
+    logger.error('❌ Error eliminando entrevista:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al eliminar la entrevista',
+      details: error.message
+    });
+  } finally {
+    client.release();
   }
-
-  console.log('❌ Cancelando entrevista:', interviewId);
-
-  // Cambiar estado a cancelado en lugar de eliminar
-  interviews[interviewIndex].status = 'CANCELLED';
-  interviews[interviewIndex].cancelledAt = new Date().toISOString();
-
-  res.json({
-    success: true,
-    message: 'Entrevista cancelada exitosamente'
-  });
 });
 
 // GET interviews by application ID - endpoint específico para obtener entrevistas de una aplicación
 app.get('/api/interviews/application/:applicationId', async (req, res) => {
   const applicationId = parseInt(req.params.applicationId);
   
-  console.log('📋 Obteniendo entrevistas para aplicación:', applicationId);
+  logger.info('📋 Obteniendo entrevistas para aplicación:', applicationId);
   
   if (!applicationId || isNaN(applicationId)) {
     return res.status(400).json({
@@ -2449,7 +2651,7 @@ app.get('/api/interviews/application/:applicationId', async (req, res) => {
 
     const result = await client.query(query, [applicationId]);
     
-    console.log(`✅ Encontradas ${result.rows.length} entrevistas para aplicación ${applicationId}`);
+    logger.info(`✅ Encontradas ${result.rows.length} entrevistas para aplicación ${applicationId}`);
     
     // Mapear los datos para que coincidan con la interfaz del frontend
     const interviews = result.rows.map(row => ({
@@ -2481,7 +2683,7 @@ app.get('/api/interviews/application/:applicationId', async (req, res) => {
     res.json(interviews);
 
   } catch (error) {
-    console.error('❌ Error obteniendo entrevistas por aplicación:', error);
+    logger.error('❌ Error obteniendo entrevistas por aplicación:', error);
     res.status(500).json({
       success: false,
       error: 'Error interno del servidor al obtener las entrevistas',
@@ -2509,7 +2711,7 @@ app.get('/api/evaluations/my-evaluations', async (req, res) => {
         const payload = JSON.parse(Buffer.from(base64Payload, 'base64').toString());
         evaluatorId = payload.userId;
       } catch (err) {
-        console.error('Error decoding token:', err);
+        logger.error('Error decoding token:', err);
       }
     }
 
@@ -2589,7 +2791,7 @@ app.get('/api/evaluations/my-evaluations', async (req, res) => {
 
     res.json(evaluations);
   } catch (error) {
-    console.error('Database error:', error);
+    logger.error('Database error:', error);
     // Fallback to mock data
     const mockEvaluations = [
       {
@@ -2631,7 +2833,7 @@ app.get('/api/interviewer-schedules/interviewer/:interviewerId/year/:year', asyn
   const client = await dbPool.connect();
   try {
     const { interviewerId, year } = req.params;
-    console.log(`📅 Getting schedules for interviewer ${interviewerId} in year ${year}`);
+    logger.info(`📅 Getting schedules for interviewer ${interviewerId} in year ${year}`);
 
     const query = `
       SELECT
@@ -2688,11 +2890,11 @@ app.get('/api/interviewer-schedules/interviewer/:interviewerId/year/:year', asyn
       updatedAt: row.updated_at
     }));
 
-    console.log(`✅ Found ${schedules.length} schedules for interviewer ${interviewerId}`);
+    logger.info(`✅ Found ${schedules.length} schedules for interviewer ${interviewerId}`);
     res.json(schedules);
 
   } catch (error) {
-    console.error('❌ Error getting interviewer schedules:', error);
+    logger.error('❌ Error getting interviewer schedules:', error);
     res.status(500).json({ error: 'Internal server error', message: error.message });
   } finally {
     client.release();
@@ -2703,9 +2905,17 @@ app.get('/api/interviewer-schedules/interviewer/:interviewerId/year/:year', asyn
 app.post('/api/interviewer-schedules', async (req, res) => {
   const client = await dbPool.connect();
   try {
-    const { interviewer, dayOfWeek, startTime, endTime, year, scheduleType, isActive, notes } = req.body;
+    // Soporte para ambos formatos: interviewer (objeto) o interviewerId (número)
+    const { interviewer, interviewerId, dayOfWeek, startTime, endTime, year, scheduleType, isActive, notes } = req.body;
 
-    console.log(`📝 Creating new schedule for interviewer ${interviewer.id}:`, {
+    // Obtener el ID del entrevistador de cualquier formato
+    const actualInterviewerId = interviewer?.id || interviewerId;
+
+    if (!actualInterviewerId) {
+      return res.status(400).json({ error: 'Se requiere interviewerId o interviewer.id' });
+    }
+
+    logger.info(`📝 Creating new schedule for interviewer ${actualInterviewerId}:`, {
       dayOfWeek, startTime, endTime, year, scheduleType, isActive
     });
 
@@ -2717,7 +2927,7 @@ app.post('/api/interviewer-schedules', async (req, res) => {
     `;
 
     const result = await client.query(query, [
-      interviewer.id,
+      actualInterviewerId,
       dayOfWeek,
       startTime,
       endTime,
@@ -2727,14 +2937,28 @@ app.post('/api/interviewer-schedules', async (req, res) => {
       notes || ''
     ]);
 
+    // Obtener información del entrevistador de la base de datos
+    const userQuery = `
+      SELECT id, first_name, last_name, email, role
+      FROM users
+      WHERE id = $1
+    `;
+    const userResult = await client.query(userQuery, [actualInterviewerId]);
+
+    if (userResult.rows.length === 0) {
+      throw new Error(`Usuario con ID ${actualInterviewerId} no encontrado`);
+    }
+
+    const user = userResult.rows[0];
+
     const newSchedule = {
       id: result.rows[0].id,
       interviewer: {
-        id: interviewer.id,
-        firstName: interviewer.firstName,
-        lastName: interviewer.lastName,
-        email: interviewer.email,
-        role: interviewer.role
+        id: user.id,
+        firstName: user.first_name,
+        lastName: user.last_name,
+        email: user.email,
+        role: user.role
       },
       dayOfWeek: result.rows[0].day_of_week,
       startTime: result.rows[0].start_time,
@@ -2747,11 +2971,11 @@ app.post('/api/interviewer-schedules', async (req, res) => {
       updatedAt: result.rows[0].updated_at
     };
 
-    console.log(`✅ Schedule created with ID ${newSchedule.id}`);
+    logger.info(`✅ Schedule created with ID ${newSchedule.id}`);
     res.status(201).json(newSchedule);
 
   } catch (error) {
-    console.error('❌ Error creating schedule:', error);
+    logger.error('❌ Error creating schedule:', error);
     res.status(500).json({ error: 'Internal server error', message: error.message });
   } finally {
     client.release();
@@ -2765,7 +2989,7 @@ app.put('/api/interviewer-schedules/:scheduleId', async (req, res) => {
     const { scheduleId } = req.params;
     const { dayOfWeek, startTime, endTime, scheduleType, isActive, notes } = req.body;
 
-    console.log(`📝 Updating schedule ${scheduleId}:`, {
+    logger.info(`📝 Updating schedule ${scheduleId}:`, {
       dayOfWeek, startTime, endTime, scheduleType, isActive
     });
 
@@ -2813,11 +3037,11 @@ app.put('/api/interviewer-schedules/:scheduleId', async (req, res) => {
       updatedAt: result.rows[0].updated_at
     };
 
-    console.log(`✅ Schedule ${scheduleId} updated successfully`);
+    logger.info(`✅ Schedule ${scheduleId} updated successfully`);
     res.json(updatedSchedule);
 
   } catch (error) {
-    console.error('❌ Error updating schedule:', error);
+    logger.error('❌ Error updating schedule:', error);
     res.status(500).json({ error: 'Internal server error', message: error.message });
   } finally {
     client.release();
@@ -2830,7 +3054,7 @@ app.delete('/api/interviewer-schedules/:scheduleId', async (req, res) => {
   try {
     const { scheduleId } = req.params;
 
-    console.log(`🗑️ Deleting schedule ${scheduleId}`);
+    logger.info(`🗑️ Deleting schedule ${scheduleId}`);
 
     const query = 'DELETE FROM interviewer_schedules WHERE id = $1';
     const result = await client.query(query, [scheduleId]);
@@ -2839,11 +3063,11 @@ app.delete('/api/interviewer-schedules/:scheduleId', async (req, res) => {
       return res.status(404).json({ error: 'Schedule not found' });
     }
 
-    console.log(`✅ Schedule ${scheduleId} deleted successfully`);
+    logger.info(`✅ Schedule ${scheduleId} deleted successfully`);
     res.status(204).send();
 
   } catch (error) {
-    console.error('❌ Error deleting schedule:', error);
+    logger.error('❌ Error deleting schedule:', error);
     res.status(500).json({ error: 'Internal server error', message: error.message });
   } finally {
     client.release();
@@ -2857,7 +3081,7 @@ app.get('/api/interviewer-schedules/interviewer/:interviewerId', async (req, res
     const { interviewerId } = req.params;
     const currentYear = new Date().getFullYear();
 
-    console.log(`📅 Getting all schedules for interviewer ${interviewerId}`);
+    logger.info(`📅 Getting all schedules for interviewer ${interviewerId}`);
 
     const query = `
       SELECT
@@ -2914,11 +3138,11 @@ app.get('/api/interviewer-schedules/interviewer/:interviewerId', async (req, res
       updatedAt: row.updated_at
     }));
 
-    console.log(`✅ Found ${schedules.length} schedules for interviewer ${interviewerId}`);
+    logger.info(`✅ Found ${schedules.length} schedules for interviewer ${interviewerId}`);
     res.json(schedules);
 
   } catch (error) {
-    console.error('❌ Error getting interviewer schedules:', error);
+    logger.error('❌ Error getting interviewer schedules:', error);
     res.status(500).json({ error: 'Internal server error', message: error.message });
   } finally {
     client.release();
@@ -2947,14 +3171,17 @@ function isTimeInRange(targetTime, startTime, endTime) {
 // Helper function to get day of week from date
 function getDayOfWeek(dateString) {
   const days = ['SUNDAY', 'MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY'];
-  const date = new Date(dateString);
+  // Parse as local date to avoid timezone issues
+  // dateString format: YYYY-MM-DD
+  const [year, month, day] = dateString.split('-').map(Number);
+  const date = new Date(year, month - 1, day); // month is 0-indexed
   return days[date.getDay()];
 }
 // Check real interviewer availability based on configured schedules and existing interviews
 app.get('/api/interviews/availability/check', async (req, res) => {
   const { date, time, duration = 60, interviewType } = req.query;
 
-  console.log('🔍 Checking availability:', { date, time, duration, interviewType });
+  logger.info('🔍 Checking availability:', { date, time, duration, interviewType });
 
   if (!date || !time) {
     return res.status(400).json({
@@ -2968,7 +3195,7 @@ app.get('/api/interviews/availability/check', async (req, res) => {
     const dayOfWeek = getDayOfWeek(date);
     const currentYear = new Date().getFullYear();
 
-    console.log(`📅 Looking for ${dayOfWeek} schedules at ${time} for year ${currentYear}`);
+    logger.info(`📅 Looking for ${dayOfWeek} schedules at ${time} for year ${currentYear}`);
 
     // Step 1: Find all interviewers with matching schedules for the day/time
     const scheduleQuery = `
@@ -2993,24 +3220,25 @@ app.get('/api/interviews/availability/check', async (req, res) => {
     `;
 
     const scheduleResult = await queryWithCircuitBreaker.fire(client, scheduleQuery, [dayOfWeek, currentYear]);
-    console.log(`📋 Found ${scheduleResult.rows.length} interviewer schedules for ${dayOfWeek}`);
+    logger.info(`📋 Found ${scheduleResult.rows.length} interviewer schedules for ${dayOfWeek}`);
 
     // Step 2: Filter by time availability
     const availableInterviewers = scheduleResult.rows.filter(row => {
       const isInTimeRange = isTimeInRange(time, row.start_time, row.end_time);
-      console.log(`⏰ ${row.first_name} ${row.last_name}: ${row.start_time}-${row.end_time}, ${time} in range? ${isInTimeRange}`);
+      logger.info(`⏰ ${row.first_name} ${row.last_name}: ${row.start_time}-${row.end_time}, ${time} in range? ${isInTimeRange}`);
       return isInTimeRange;
     });
 
-    console.log(`✅ ${availableInterviewers.length} interviewers available at ${time}`);
+    logger.info(`✅ ${availableInterviewers.length} interviewers available at ${time}`);
 
     // Step 3: Check for conflicts with existing interviews
+    // 🔒 IMPORTANTE: Verificar TANTO interviewer_id COMO second_interviewer_id
     const conflictQuery = `
-      SELECT interviewer_id, scheduled_date, duration_minutes
+      SELECT interviewer_id, second_interviewer_id, scheduled_date, duration_minutes
       FROM interviews
       WHERE DATE(scheduled_date) = $1
         AND status NOT IN ('CANCELLED', 'NO_SHOW')
-        AND interviewer_id = ANY($2)
+        AND (interviewer_id = ANY($2) OR second_interviewer_id = ANY($2))
     `;
 
     const interviewerIds = availableInterviewers.map(i => i.interviewer_id);
@@ -3020,12 +3248,14 @@ app.get('/api/interviews/availability/check', async (req, res) => {
     if (interviewerIds.length > 0) {
       const conflictResult = await queryWithCircuitBreaker.fire(client, conflictQuery, [date, interviewerIds]);
 
-      console.log(`📊 Found ${conflictResult.rows.length} existing interviews on ${date}`);
+      logger.info(`📊 Found ${conflictResult.rows.length} existing interviews on ${date}`);
 
       // Filter out interviewers with time conflicts
+      // 🔒 IMPORTANTE: Verificar conflictos tanto como interviewer_id o second_interviewer_id
       finalAvailable = availableInterviewers.filter(interviewer => {
         const conflicts = conflictResult.rows.filter(interview =>
-          interview.interviewer_id === interviewer.interviewer_id
+          interview.interviewer_id === interviewer.interviewer_id ||
+          interview.second_interviewer_id === interviewer.interviewer_id
         );
 
         for (const conflict of conflicts) {
@@ -3039,7 +3269,7 @@ app.get('/api/interviews/availability/check', async (req, res) => {
 
           // Check for overlap
           if (requestStart < conflictEnd && requestEnd > conflictStart) {
-            console.log(`❌ Conflict for ${interviewer.first_name}: existing ${conflictStart}-${conflictEnd}, requested ${requestStart}-${requestEnd}`);
+            logger.info(`❌ Conflict for ${interviewer.first_name}: existing ${conflictStart}-${conflictEnd}, requested ${requestStart}-${requestEnd}`);
             return false;
           }
         }
@@ -3063,7 +3293,7 @@ app.get('/api/interviews/availability/check', async (req, res) => {
       );
     }
 
-    console.log(`🎯 Final available interviewers: ${finalAvailable.length}`);
+    logger.info(`🎯 Final available interviewers: ${finalAvailable.length}`);
 
     const responseData = {
       date,
@@ -3094,10 +3324,140 @@ app.get('/api/interviews/availability/check', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Error checking availability:', error);
+    logger.error('❌ Error checking availability:', error);
     res.status(500).json({
       success: false,
       error: 'Error checking availability',
+      details: error.message
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// NEW: Check joint availability for 2 interviewers (for FAMILY interviews)
+app.post('/api/interviews/availability/check-dual', async (req, res) => {
+  const { firstInterviewerId, secondInterviewerId, scheduledDate, scheduledTime, duration = 60 } = req.body;
+
+  logger.info('🔍 Checking dual availability:', req.body);
+
+  // Validar campos requeridos
+  if (!firstInterviewerId || !secondInterviewerId || !scheduledDate || !scheduledTime) {
+    return res.status(400).json({
+      success: false,
+      error: 'firstInterviewerId, secondInterviewerId, scheduledDate y scheduledTime son requeridos'
+    });
+  }
+
+  // Combinar fecha y hora
+  const fullDateTime = `${scheduledDate}T${scheduledTime}:00`;
+  const inputDate = new Date(fullDateTime);
+
+  if (isNaN(inputDate.getTime())) {
+    return res.status(400).json({
+      success: false,
+      error: 'Formato de fecha/hora inválido'
+    });
+  }
+
+  // Crear fecha normalizada para PostgreSQL
+  const year = inputDate.getFullYear();
+  const month = String(inputDate.getMonth() + 1).padStart(2, '0');
+  const day = String(inputDate.getDate()).padStart(2, '0');
+  const hours = String(inputDate.getHours()).padStart(2, '0');
+  const minutes = String(inputDate.getMinutes()).padStart(2, '0');
+  const seconds = String(inputDate.getSeconds()).padStart(2, '0');
+  const normalizedScheduledDate = `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+
+  const client = await dbPool.connect();
+  try {
+    // Verificar disponibilidad del primer entrevistador
+    const firstConflictQuery = `
+      SELECT id, scheduled_date, status, interviewer_id, second_interviewer_id
+      FROM interviews
+      WHERE (interviewer_id = $1 OR second_interviewer_id = $1)
+        AND scheduled_date = $2
+        AND status IN ('SCHEDULED', 'CONFIRMED', 'IN_PROGRESS')
+    `;
+
+    const firstConflictResult = await client.query(firstConflictQuery, [
+      parseInt(firstInterviewerId),
+      normalizedScheduledDate
+    ]);
+
+    const firstAvailable = firstConflictResult.rows.length === 0;
+
+    // Verificar disponibilidad del segundo entrevistador
+    const secondConflictQuery = `
+      SELECT id, scheduled_date, status, interviewer_id, second_interviewer_id
+      FROM interviews
+      WHERE (interviewer_id = $1 OR second_interviewer_id = $1)
+        AND scheduled_date = $2
+        AND status IN ('SCHEDULED', 'CONFIRMED', 'IN_PROGRESS')
+    `;
+
+    const secondConflictResult = await client.query(secondConflictQuery, [
+      parseInt(secondInterviewerId),
+      normalizedScheduledDate
+    ]);
+
+    const secondAvailable = secondConflictResult.rows.length === 0;
+
+    // Obtener nombres de entrevistadores para respuesta
+    const interviewersQuery = `
+      SELECT id, first_name, last_name, email, role
+      FROM users
+      WHERE id = ANY($1)
+    `;
+
+    const interviewersResult = await client.query(interviewersQuery, [
+      [parseInt(firstInterviewerId), parseInt(secondInterviewerId)]
+    ]);
+
+    const firstInterviewer = interviewersResult.rows.find(u => u.id == firstInterviewerId);
+    const secondInterviewer = interviewersResult.rows.find(u => u.id == secondInterviewerId);
+
+    // Respuesta con información detallada
+    const response = {
+      success: true,
+      bothAvailable: firstAvailable && secondAvailable,
+      firstInterviewer: {
+        id: parseInt(firstInterviewerId),
+        name: firstInterviewer ? `${firstInterviewer.first_name} ${firstInterviewer.last_name}` : 'Desconocido',
+        available: firstAvailable,
+        conflict: firstConflictResult.rows.length > 0 ? {
+          interviewId: firstConflictResult.rows[0].id,
+          scheduledDate: firstConflictResult.rows[0].scheduled_date,
+          status: firstConflictResult.rows[0].status
+        } : null
+      },
+      secondInterviewer: {
+        id: parseInt(secondInterviewerId),
+        name: secondInterviewer ? `${secondInterviewer.first_name} ${secondInterviewer.last_name}` : 'Desconocido',
+        available: secondAvailable,
+        conflict: secondConflictResult.rows.length > 0 ? {
+          interviewId: secondConflictResult.rows[0].id,
+          scheduledDate: secondConflictResult.rows[0].scheduled_date,
+          status: secondConflictResult.rows[0].status
+        } : null
+      },
+      requestedSlot: {
+        date: scheduledDate,
+        time: scheduledTime,
+        duration: parseInt(duration),
+        normalizedDateTime: normalizedScheduledDate
+      }
+    };
+
+    logger.info('✅ Dual availability check result:', response);
+
+    res.json(response);
+
+  } catch (error) {
+    logger.error('❌ Error checking dual availability:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error verificando disponibilidad conjunta',
       details: error.message
     });
   } finally {
@@ -3109,7 +3469,7 @@ app.get('/api/interviews/availability/check', async (req, res) => {
 app.get('/api/interviews/student/:applicationId/complete', async (req, res) => {
   const { applicationId } = req.params;
 
-  console.log('📋 Getting complete student details for application:', applicationId);
+  logger.info('📋 Getting complete student details for application:', applicationId);
 
   const client = await dbPool.connect();
   try {
@@ -3232,7 +3592,7 @@ app.get('/api/interviews/student/:applicationId/complete', async (req, res) => {
       }
     };
 
-    console.log(`✅ Student details: ${interviews.length}/4 interviews completed`);
+    logger.info(`✅ Student details: ${interviews.length}/4 interviews completed`);
 
     res.json({
       success: true,
@@ -3240,7 +3600,7 @@ app.get('/api/interviews/student/:applicationId/complete', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Error getting student details:', error);
+    logger.error('❌ Error getting student details:', error);
     res.status(500).json({
       success: false,
       error: 'Error getting student details',
@@ -3257,18 +3617,15 @@ app.get('/api/interviews/metadata/enums', (req, res) => {
   const cacheKey = 'interviews:metadata:enums';
   const cached = evaluationCache.get(cacheKey);
   if (cached) {
-    console.log('[Cache HIT] interviews:metadata:enums');
+    logger.info('[Cache HIT] interviews:metadata:enums');
     return res.json(cached);
   }
-  console.log('[Cache MISS] interviews:metadata:enums');
+  logger.info('[Cache MISS] interviews:metadata:enums');
 
   const enums = {
     interviewTypes: [
-      { value: 'INDIVIDUAL', label: 'Entrevista Individual', description: 'Entrevista con el estudiante' },
       { value: 'FAMILY', label: 'Entrevista Familiar', description: 'Entrevista con la familia' },
-      { value: 'PSYCHOLOGICAL', label: 'Evaluación Psicológica', description: 'Evaluación psicológica del estudiante' },
-      { value: 'ACADEMIC', label: 'Evaluación Académica', description: 'Evaluación académica y de conocimientos' },
-      { value: 'BEHAVIORAL', label: 'Evaluación Conductual', description: 'Evaluación de comportamiento y adaptación' }
+      { value: 'CYCLE_DIRECTOR', label: 'Entrevista Director de Ciclo', description: 'Entrevista con el director de ciclo' }
     ],
     interviewModes: [
       { value: 'PRESENTIAL', label: 'Presencial', description: 'Entrevista en las instalaciones del colegio' },
@@ -3285,10 +3642,9 @@ app.get('/api/interviews/metadata/enums', (req, res) => {
       { value: 'RESCHEDULED', label: 'Reprogramada', description: 'Entrevista reprogramada' }
     ],
     userRoles: [
-      { value: 'TEACHER', label: 'Profesor', canInterview: ['INDIVIDUAL', 'ACADEMIC'] },
-      { value: 'COORDINATOR', label: 'Coordinador', canInterview: ['INDIVIDUAL', 'FAMILY', 'ACADEMIC'] },
-      { value: 'PSYCHOLOGIST', label: 'Psicólogo', canInterview: ['INDIVIDUAL', 'FAMILY', 'PSYCHOLOGICAL', 'BEHAVIORAL'] },
-      { value: 'CYCLE_DIRECTOR', label: 'Director de Ciclo', canInterview: ['INDIVIDUAL', 'FAMILY', 'ACADEMIC', 'BEHAVIORAL'] }
+      { value: 'COORDINATOR', label: 'Coordinador', canInterview: ['FAMILY'] },
+      { value: 'PSYCHOLOGIST', label: 'Psicólogo', canInterview: ['FAMILY'] },
+      { value: 'CYCLE_DIRECTOR', label: 'Director de Ciclo', canInterview: ['FAMILY', 'CYCLE_DIRECTOR'] }
     ]
   };
 
@@ -3306,7 +3662,7 @@ app.get('/api/interviews/metadata/enums', (req, res) => {
 app.post('/api/interviews/validate', async (req, res) => {
   const { applicationId, interviewType, interviewerId, scheduledDate, scheduledTime, duration = 60 } = req.body;
 
-  console.log('🔍 Validating interview creation:', req.body);
+  logger.info('🔍 Validating interview creation:', req.body);
 
   const client = await dbPool.connect();
   try {
@@ -3432,7 +3788,7 @@ app.post('/api/interviews/validate', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Error validating interview:', error);
+    logger.error('❌ Error validating interview:', error);
     res.status(500).json({
       success: false,
       error: 'Error validating interview',
@@ -3459,7 +3815,7 @@ app.post('/api/interviews/create-validated', async (req, res) => {
     notes
   } = req.body;
 
-  console.log('🎯 Creating validated interview:', req.body);
+  logger.info('🎯 Creating validated interview:', req.body);
 
   const client = await dbPool.connect();
   try {
@@ -3534,7 +3890,7 @@ app.post('/api/interviews/create-validated', async (req, res) => {
     const result = await client.query(insertQuery, values);
     const newInterview = result.rows[0];
 
-    console.log('✅ Interview created with validation:', newInterview.id);
+    logger.info('✅ Interview created with validation:', newInterview.id);
 
     res.status(201).json({
       success: true,
@@ -3546,7 +3902,7 @@ app.post('/api/interviews/create-validated', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Error creating validated interview:', error);
+    logger.error('❌ Error creating validated interview:', error);
     res.status(500).json({
       success: false,
       error: 'Error creating interview',
@@ -3561,11 +3917,11 @@ app.post('/api/interviews/create-validated', async (req, res) => {
 app.post('/api/interviews/application/:applicationId/send-summary', async (req, res) => {
   const { applicationId } = req.params;
 
-  console.log(`📧 Enviando resumen de entrevistas para aplicación ${applicationId}`);
+  logger.info(`📧 Enviando resumen de entrevistas para aplicación ${applicationId}`);
 
   const client = await dbPool.connect();
   try {
-    // 1. Verificar que todas las entrevistas requeridas estén agendadas
+    // 1. Verificar que haya al menos una entrevista agendada
     const allInterviewsQuery = await client.query(
       `SELECT
         i.id, i.interview_type, i.scheduled_date, i.duration_minutes, i.location,
@@ -3577,22 +3933,19 @@ app.post('/api/interviews/application/:applicationId/send-summary', async (req, 
       [parseInt(applicationId)]
     );
 
-    const requiredTypes = ['INDIVIDUAL', 'FAMILY', 'PSYCHOLOGICAL'];
-    const scheduledTypes = allInterviewsQuery.rows.map(r => r.interview_type);
-    const allRequiredScheduled = requiredTypes.every(type => scheduledTypes.includes(type));
-
-    if (!allRequiredScheduled) {
-      const missingTypes = requiredTypes.filter(type => !scheduledTypes.includes(type));
+    // Verificar que haya al menos una entrevista agendada
+    if (allInterviewsQuery.rows.length === 0) {
       return res.status(400).json({
         success: false,
-        error: 'No todas las entrevistas requeridas están agendadas',
+        error: 'No hay entrevistas agendadas para esta aplicación',
         details: {
-          required: requiredTypes,
-          scheduled: scheduledTypes,
-          missing: missingTypes
+          applicationId,
+          scheduledCount: 0
         }
       });
     }
+
+    logger.info(`✅ Encontradas ${allInterviewsQuery.rows.length} entrevistas agendadas para aplicación ${applicationId}`);
 
     // 2. Obtener datos del estudiante y apoderado (usuario que creó la aplicación)
     const studentQuery = await client.query(
@@ -3647,7 +4000,7 @@ app.post('/api/interviews/application/:applicationId/send-summary', async (req, 
     });
 
     // 4. Enviar el email al apoderado que creó la aplicación
-    console.log(`📬 Enviando email a ${applicationData.applicant_email}...`);
+    logger.info(`📬 Enviando email a ${applicationData.applicant_email}...`);
 
     const emailResponse = await axios.post('http://localhost:8085/api/notifications/send', {
       type: 'email',
@@ -3662,7 +4015,7 @@ app.post('/api/interviews/application/:applicationId/send-summary', async (req, 
       }
     });
 
-    console.log('✅ Email de resumen enviado exitosamente');
+    logger.info('✅ Email de resumen enviado exitosamente');
 
     res.status(200).json({
       success: true,
@@ -3678,7 +4031,7 @@ app.post('/api/interviews/application/:applicationId/send-summary', async (req, 
     });
 
   } catch (error) {
-    console.error('❌ Error enviando resumen de entrevistas:', error);
+    logger.error('❌ Error enviando resumen de entrevistas:', error);
     res.status(500).json({
       success: false,
       error: 'Error enviando resumen de entrevistas',
@@ -3746,16 +4099,16 @@ const mockEvaluations = [
 app.get('/api/evaluations/evaluators/:role', async (req, res) => {
   const { role } = req.params;
 
-  console.log(`📋 Getting REAL evaluators for role: ${role}`);
+  logger.info(`📋 Getting REAL evaluators for role: ${role}`);
 
   // Check cache first (cache key includes role)
   const cacheKey = `evaluations:evaluators:${role}`;
   const cached = evaluationCache.get(cacheKey);
   if (cached) {
-    console.log(`[Cache HIT] evaluations:evaluators:${role}`);
+    logger.info(`[Cache HIT] evaluations:evaluators:${role}`);
     return res.json(cached);
   }
-  console.log(`[Cache MISS] evaluations:evaluators:${role}`);
+  logger.info(`[Cache MISS] evaluations:evaluators:${role}`);
 
   const client = await dbPool.connect();
   try {
@@ -3818,7 +4171,7 @@ app.get('/api/evaluations/evaluators/:role', async (req, res) => {
       active: user.active
     }));
 
-    console.log(`✅ Found ${evaluators.length} real evaluators for ${role}:`,
+    logger.info(`✅ Found ${evaluators.length} real evaluators for ${role}:`,
                 evaluators.map(e => `${e.firstName} ${e.lastName}`));
 
     // Cache raw array for 10 minutes (unwrapped for QA test compatibility)
@@ -3826,7 +4179,7 @@ app.get('/api/evaluations/evaluators/:role', async (req, res) => {
     res.json(evaluators);
 
   } catch (error) {
-    console.error('❌ Error fetching real evaluators:', error);
+    logger.error('❌ Error fetching real evaluators:', error);
     // Fallback a datos mock en caso de error (unwrapped)
     const evaluators = mockEvaluatorsByRole[role] || [];
     res.json(evaluators);
@@ -3839,7 +4192,7 @@ app.get('/api/evaluations/evaluators/:role', async (req, res) => {
 app.get('/api/evaluations/public/evaluators/:role', async (req, res) => {
   const { role } = req.params;
 
-  console.log(`📋 Getting REAL evaluators for role (public): ${role}`);
+  logger.info(`📋 Getting REAL evaluators for role (public): ${role}`);
 
   const client = await dbPool.connect();
   try {
@@ -3902,12 +4255,12 @@ app.get('/api/evaluations/public/evaluators/:role', async (req, res) => {
       active: user.active
     }));
 
-    console.log(`✅ Found ${evaluators.length} real evaluators for ${role} (public):`,
+    logger.info(`✅ Found ${evaluators.length} real evaluators for ${role} (public):`,
                 evaluators.map(e => `${e.firstName} ${e.lastName}`));
     res.json(evaluators);
 
   } catch (error) {
-    console.error('❌ Error fetching real evaluators (public):', error);
+    logger.error('❌ Error fetching real evaluators (public):', error);
     // Fallback a datos mock en caso de error
     const evaluators = mockEvaluatorsByRole[role] || [];
     res.json(evaluators);
@@ -3920,7 +4273,7 @@ app.get('/api/evaluations/public/evaluators/:role', async (req, res) => {
 app.post('/api/evaluations/assign/:applicationId', (req, res) => {
   const { applicationId } = req.params;
 
-  console.log(`🔄 Auto-assigning evaluations to application: ${applicationId}`);
+  logger.info(`🔄 Auto-assigning evaluations to application: ${applicationId}`);
 
   // Mock automatic assignment - create evaluations for each type
   const evaluationTypes = ['LANGUAGE_EXAM', 'MATHEMATICS_EXAM', 'ENGLISH_EXAM', 'CYCLE_DIRECTOR_REPORT', 'PSYCHOLOGICAL_INTERVIEW'];
@@ -3952,7 +4305,7 @@ app.post('/api/evaluations/assign/:applicationId', (req, res) => {
 app.post('/api/evaluations/public/assign/:applicationId', (req, res) => {
   const { applicationId } = req.params;
 
-  console.log(`🔄 Auto-assigning evaluations to application (public): ${applicationId}`);
+  logger.info(`🔄 Auto-assigning evaluations to application (public): ${applicationId}`);
 
   // Mock automatic assignment - create evaluations for each type
   const evaluationTypes = ['LANGUAGE_EXAM', 'MATHEMATICS_EXAM', 'ENGLISH_EXAM', 'CYCLE_DIRECTOR_REPORT', 'PSYCHOLOGICAL_INTERVIEW'];
@@ -3984,7 +4337,7 @@ app.post('/api/evaluations/public/assign/:applicationId', (req, res) => {
 app.post('/api/evaluations/assign/:applicationId/:evaluationType/:evaluatorId', async (req, res) => {
   const { applicationId, evaluationType, evaluatorId } = req.params;
 
-  console.log(`🎯 Assigning specific evaluation: ${evaluationType} to evaluator ${evaluatorId} for application ${applicationId}`);
+  logger.info(`🎯 Assigning specific evaluation: ${evaluationType} to evaluator ${evaluatorId} for application ${applicationId}`);
 
   const client = await dbPool.connect();
   try {
@@ -4002,7 +4355,7 @@ app.post('/api/evaluations/assign/:applicationId/:evaluationType/:evaluatorId', 
     // If evaluation already exists, resend notification email instead of returning error
     if (existingEval.rows.length > 0) {
       const existingEvaluationId = existingEval.rows[0].id;
-      console.log(`ℹ️ Evaluation already exists (ID: ${existingEvaluationId}). Resending notification email...`);
+      logger.info(`ℹ️ Evaluation already exists (ID: ${existingEvaluationId}). Resending notification email...`);
 
       // Get existing evaluation with evaluator details
       const evalDetailsQuery = `
@@ -4061,9 +4414,9 @@ app.post('/api/evaluations/assign/:applicationId/:evaluationType/:evaluatorId', 
             </div>
             `
           );
-          console.log(`📧 Reminder email sent to ${evaluation.email} for evaluation ID ${existingEvaluationId}`);
+          logger.info(`📧 Reminder email sent to ${evaluation.email} for evaluation ID ${existingEvaluationId}`);
         } catch (emailError) {
-          console.error('❌ Error sending reminder email:', emailError);
+          logger.error('❌ Error sending reminder email:', emailError);
         }
       }
 
@@ -4140,7 +4493,7 @@ app.post('/api/evaluations/assign/:applicationId/:evaluationType/:evaluatorId', 
       }
     };
 
-    console.log(`✅ Evaluation assigned successfully: ID=${evaluation.id}, Type=${evaluationType}, Evaluator=${evaluator.first_name} ${evaluator.last_name}`);
+    logger.info(`✅ Evaluation assigned successfully: ID=${evaluation.id}, Type=${evaluationType}, Evaluator=${evaluator.first_name} ${evaluator.last_name}`);
 
     // Get student information for email
     const studentQuery = await dbPool.query(`
@@ -4174,9 +4527,9 @@ app.post('/api/evaluations/assign/:applicationId/:evaluationType/:evaluatorId', 
           evaluationType: evaluationTypeES[evaluationType] || evaluationType,
           applicationId: applicationId
         });
-        console.log(`📧 Email sent to ${evaluator.email} about ${studentFullName}`);
+        logger.info(`📧 Email sent to ${evaluator.email} about ${studentFullName}`);
       } catch (emailError) {
-        console.error('❌ Error sending evaluation assignment email:', emailError.message);
+        logger.error('❌ Error sending evaluation assignment email:', emailError.message);
         // Don't fail the assignment if email fails
       }
     }
@@ -4187,7 +4540,7 @@ app.post('/api/evaluations/assign/:applicationId/:evaluationType/:evaluatorId', 
     res.json(evaluation);
   } catch (error) {
     client.release();
-    console.error('❌ Error assigning evaluation:', error);
+    logger.error('❌ Error assigning evaluation:', error);
     res.status(500).json({ error: 'Error al asignar evaluación', details: error.message });
   }
 });
@@ -4196,7 +4549,7 @@ app.post('/api/evaluations/assign/:applicationId/:evaluationType/:evaluatorId', 
 app.get('/api/evaluations/application/:applicationId', async (req, res) => {
   const { applicationId} = req.params;
 
-  console.log(`📋 Getting evaluations for application: ${applicationId}`);
+  logger.info(`📋 Getting evaluations for application: ${applicationId}`);
 
   const client = await dbPool.connect();
   try {
@@ -4254,7 +4607,7 @@ app.get('/api/evaluations/application/:applicationId', async (req, res) => {
     res.json(evaluations);
   } catch (error) {
     client.release();
-    console.error('❌ Error getting evaluations for application:', error);
+    logger.error('❌ Error getting evaluations for application:', error);
     res.status(500).json(ResponseHelper.fail('Error al obtener evaluaciones de la aplicación', { errorCode: 'EVAL_APP_ERROR' }));
   }
 });
@@ -4263,7 +4616,7 @@ app.get('/api/evaluations/application/:applicationId', async (req, res) => {
 app.get('/api/evaluations/application/:applicationId/detailed', (req, res) => {
   const { applicationId } = req.params;
 
-  console.log(`📋 Getting detailed evaluations for application: ${applicationId}`);
+  logger.info(`📋 Getting detailed evaluations for application: ${applicationId}`);
 
   const applicationEvaluations = mockEvaluations.filter(
     eval => eval.applicationId === parseInt(applicationId)
@@ -4295,7 +4648,7 @@ app.get('/api/evaluations/application/:applicationId/detailed', (req, res) => {
 app.get('/api/evaluations/application/:applicationId/progress', (req, res) => {
   const { applicationId } = req.params;
 
-  console.log(`📊 Getting evaluation progress for application: ${applicationId}`);
+  logger.info(`📊 Getting evaluation progress for application: ${applicationId}`);
 
   const applicationEvaluations = mockEvaluations.filter(
     eval => eval.applicationId === parseInt(applicationId)
@@ -4322,7 +4675,7 @@ app.get('/api/evaluations/application/:applicationId/progress', (req, res) => {
 
 // Get my evaluations
 app.get('/api/evaluations/my-pending', (req, res) => {
-  console.log('📋 Getting my pending evaluations');
+  logger.info('📋 Getting my pending evaluations');
 
   const pendingEvaluations = mockEvaluations.filter(eval => eval.status === 'PENDING');
 
@@ -4334,7 +4687,7 @@ app.put('/api/evaluations/:evaluationId', async (req, res) => {
   const { evaluationId } = req.params;
   const updateData = req.body;
 
-  console.log(`✏️ Updating evaluation ${evaluationId}:`, updateData);
+  logger.info(`✏️ Updating evaluation ${evaluationId}:`, updateData);
 
   try {
     const client = await dbPool.connect();
@@ -4395,8 +4748,8 @@ app.put('/api/evaluations/:evaluationId', async (req, res) => {
         created_at, updated_at, completion_date
     `;
 
-    console.log('🔍 Query:', query);
-    console.log('🔍 Values:', values);
+    logger.info('🔍 Query:', query);
+    logger.info('🔍 Values:', values);
 
     // Circuit breaker temporarily disabled for writes due to closure issues
     // TODO: Fix circuit breaker implementation for database write operations
@@ -4407,11 +4760,16 @@ app.put('/api/evaluations/:evaluationId', async (req, res) => {
       return res.status(404).json({ error: 'Evaluation not found' });
     }
 
-    console.log('✅ Evaluation updated successfully:', result.rows[0]);
+    // ============= CACHE INVALIDATION =============
+    // Invalidate evaluation-related caches after successful update
+    const cleared = evaluationCache.clear('evaluations:');
+    logger.info(`[Cache Invalidation] Cleared ${cleared} evaluation cache entries after evaluation update (ID: ${evaluationId})`);
+
+    logger.info('✅ Evaluation updated successfully:', result.rows[0]);
     res.json(result.rows[0]);
 
   } catch (error) {
-    console.error('❌ Error updating evaluation:', error);
+    logger.error('❌ Error updating evaluation:', error);
     res.status(500).json({
       error: 'Error al actualizar la evaluación',
       details: error.message
@@ -4423,7 +4781,7 @@ app.put('/api/evaluations/:evaluationId', async (req, res) => {
 app.get('/api/evaluations/stats', async (req, res) => {
   const client = await dbPool.connect();
   try {
-    console.log('📊 Getting global evaluation statistics');
+    logger.info('📊 Getting global evaluation statistics');
 
     // Get counts by status
     const statusQuery = `
@@ -4485,11 +4843,11 @@ app.get('/api/evaluations/stats', async (req, res) => {
       }
     };
 
-    console.log('✅ Statistics generated:', stats.data);
+    logger.info('✅ Statistics generated:', stats.data);
     res.json(stats);
 
   } catch (error) {
-    console.error('❌ Error getting evaluation statistics:', error);
+    logger.error('❌ Error getting evaluation statistics:', error);
     res.status(500).json({
       success: false,
       error: 'Error getting statistics',
@@ -4504,7 +4862,7 @@ app.get('/api/evaluations/stats', async (req, res) => {
 app.get('/api/evaluations/:evaluationId', async (req, res) => {
   const { evaluationId } = req.params;
 
-  console.log(`📋 Getting evaluation by ID: ${evaluationId}`);
+  logger.info(`📋 Getting evaluation by ID: ${evaluationId}`);
 
   try {
     const client = await dbPool.connect();
@@ -4558,7 +4916,7 @@ app.get('/api/evaluations/:evaluationId', async (req, res) => {
     res.json({ success: true, data: result.rows[0] });
 
   } catch (error) {
-    console.error('❌ Error fetching evaluation:', error);
+    logger.error('❌ Error fetching evaluation:', error);
     res.status(500).json({
       error: 'Error al obtener la evaluación',
       details: error.message
@@ -4570,7 +4928,7 @@ app.get('/api/evaluations/:evaluationId', async (req, res) => {
 app.get('/api/evaluations/:evaluationId/interview', async (req, res) => {
   const { evaluationId } = req.params;
 
-  console.log(`🎤 Getting interview data for evaluation ${evaluationId}`);
+  logger.info(`🎤 Getting interview data for evaluation ${evaluationId}`);
 
   try {
     const client = await dbPool.connect();
@@ -4620,7 +4978,7 @@ app.get('/api/evaluations/:evaluationId/interview', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Error fetching interview data:', error);
+    logger.error('❌ Error fetching interview data:', error);
     res.status(500).json({
       error: 'Error al obtener datos de la entrevista',
       details: error.message
@@ -4632,7 +4990,7 @@ app.get('/api/evaluations/:evaluationId/interview', async (req, res) => {
 app.get('/api/evaluations/student/:studentId/history', async (req, res) => {
   const { studentId } = req.params;
 
-  console.log(`📚 Getting evaluation history for student ${studentId}`);
+  logger.info(`📚 Getting evaluation history for student ${studentId}`);
 
   try {
     const client = await dbPool.connect();
@@ -4668,7 +5026,7 @@ app.get('/api/evaluations/student/:studentId/history', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Error fetching student evaluation history:', error);
+    logger.error('❌ Error fetching student evaluation history:', error);
     res.status(500).json({
       error: 'Error al obtener el historial de evaluaciones',
       details: error.message
@@ -4680,7 +5038,7 @@ app.get('/api/evaluations/student/:studentId/history', async (req, res) => {
 app.post('/api/evaluations/assign/bulk', (req, res) => {
   const { applicationIds } = req.body;
 
-  console.log(`🔄 Bulk assigning evaluations to applications:`, applicationIds);
+  logger.info(`🔄 Bulk assigning evaluations to applications:`, applicationIds);
 
   const results = {
     totalApplications: applicationIds.length,
@@ -4721,7 +5079,7 @@ app.post('/api/evaluations/assign/bulk', (req, res) => {
 app.post('/api/evaluations/public/assign/bulk', (req, res) => {
   const { applicationIds } = req.body;
 
-  console.log(`🔄 Bulk assigning evaluations to applications (public):`, applicationIds);
+  logger.info(`🔄 Bulk assigning evaluations to applications (public):`, applicationIds);
 
   const results = {
     totalApplications: applicationIds.length,
@@ -4762,7 +5120,7 @@ app.post('/api/evaluations/public/assign/bulk', (req, res) => {
 app.put('/api/evaluations/:evaluationId/reassign/:newEvaluatorId', (req, res) => {
   const { evaluationId, newEvaluatorId } = req.params;
 
-  console.log(`🔄 Reassigning evaluation ${evaluationId} to evaluator ${newEvaluatorId}`);
+  logger.info(`🔄 Reassigning evaluation ${evaluationId} to evaluator ${newEvaluatorId}`);
 
   const evaluationIndex = mockEvaluations.findIndex(eval => eval.id === parseInt(evaluationId));
 
@@ -4787,6 +5145,8 @@ app.put('/api/evaluations/:evaluationId/reassign/:newEvaluatorId', (req, res) =>
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const createLogger = require('./logger');
+const logger = createLogger('evaluation-service');
 
 // Configure multer for file uploads
 const storage = multer.diskStorage({
@@ -4852,19 +5212,19 @@ app.post('/api/evaluations/:evaluationId/attachments', upload.single('file'), as
     const result = await writeOperationBreaker.fire(() => client.query(query, values));
     client.release();
 
-    console.log(`✅ File uploaded for evaluation ${evaluationId}: ${req.file.originalname}`);
+    logger.info(`✅ File uploaded for evaluation ${evaluationId}: ${req.file.originalname}`);
 
     res.json({
       success: true,
       attachment: result.rows[0]
     });
   } catch (error) {
-    console.error('❌ Error uploading file:', error);
+    logger.error('❌ Error uploading file:', error);
 
     // Delete uploaded file if database insert fails
     if (req.file && req.file.path) {
       fs.unlink(req.file.path, (err) => {
-        if (err) console.error('Error deleting file after failed upload:', err);
+        if (err) logger.error('Error deleting file after failed upload:', err);
       });
     }
 
@@ -4900,7 +5260,7 @@ app.get('/api/evaluations/:evaluationId/attachments', async (req, res) => {
       attachments: result.rows
     });
   } catch (error) {
-    console.error('❌ Error fetching attachments:', error);
+    logger.error('❌ Error fetching attachments:', error);
     res.status(500).json({
       error: 'Error al obtener los archivos adjuntos',
       details: error.message
@@ -4941,7 +5301,7 @@ app.get('/api/evaluations/attachments/:attachmentId/download', async (req, res) 
     fileStream.pipe(res);
 
   } catch (error) {
-    console.error('❌ Error downloading file:', error);
+    logger.error('❌ Error downloading file:', error);
     res.status(500).json({
       error: 'Error al descargar el archivo',
       details: error.message
@@ -4975,18 +5335,18 @@ app.delete('/api/evaluations/attachments/:attachmentId', async (req, res) => {
     // Delete physical file
     if (fs.existsSync(filePath)) {
       fs.unlink(filePath, (err) => {
-        if (err) console.error('Error deleting physical file:', err);
+        if (err) logger.error('Error deleting physical file:', err);
       });
     }
 
-    console.log(`✅ Attachment ${attachmentId} deleted successfully`);
+    logger.info(`✅ Attachment ${attachmentId} deleted successfully`);
 
     res.json({
       success: true,
       message: 'Archivo eliminado correctamente'
     });
   } catch (error) {
-    console.error('❌ Error deleting attachment:', error);
+    logger.error('❌ Error deleting attachment:', error);
     res.status(500).json({
       error: 'Error al eliminar el archivo',
       details: error.message
@@ -4994,7 +5354,7 @@ app.delete('/api/evaluations/attachments/:attachmentId', async (req, res) => {
   }
 });
 
-console.log('✅ File attachment endpoints initialized');
+logger.info('✅ File attachment endpoints initialized');
 
 // ============= HU-7: NOTIFICATION TRIGGERS =============
 
@@ -5008,7 +5368,7 @@ async function sendEvaluationAssignedNotification(evaluationId, evaluatorId, app
     const userResult = await simpleQueryBreaker.fire(client, userQuery, [evaluatorId]);
 
     if (userResult.rows.length === 0) {
-      console.error('❌ Evaluator not found');
+      logger.error('❌ Evaluator not found');
       client.release();
       return;
     }
@@ -5028,7 +5388,7 @@ async function sendEvaluationAssignedNotification(evaluationId, evaluatorId, app
     const appResult = await simpleQueryBreaker.fire(client, appQuery, [applicationId]);
 
     if (appResult.rows.length === 0) {
-      console.error('❌ Application not found');
+      logger.error('❌ Application not found');
       client.release();
       return;
     }
@@ -5059,18 +5419,18 @@ async function sendEvaluationAssignedNotification(evaluationId, evaluatorId, app
 
     client.release();
 
-    console.log(`✅ Notification created for evaluator ${evaluator.email}: Evaluation ${evaluationId}`);
+    logger.info(`✅ Notification created for evaluator ${evaluator.email}: Evaluation ${evaluationId}`);
 
     // TODO: Send email via notification service
     // For now, just log it
-    console.log(`📧 Email would be sent to: ${evaluator.email}`);
-    console.log(`   Subject: ${title}`);
-    console.log(`   Message: ${message}`);
+    logger.info(`📧 Email would be sent to: ${evaluator.email}`);
+    logger.info(`   Subject: ${title}`);
+    logger.info(`   Message: ${message}`);
 
     return notificationId;
 
   } catch (error) {
-    console.error('❌ Error sending evaluation notification:', error);
+    logger.error('❌ Error sending evaluation notification:', error);
   }
 }
 
@@ -5101,14 +5461,19 @@ app.post('/api/evaluations', async (req, res) => {
 
     const newEvaluation = result.rows[0];
 
-    console.log(`✅ Evaluation created: ${newEvaluation.id} for application ${application_id}`);
+    logger.info(`✅ Evaluation created: ${newEvaluation.id} for application ${application_id}`);
+
+    // ============= CACHE INVALIDATION =============
+    // Invalidate evaluation-related caches after successful creation
+    const cleared = evaluationCache.clear('evaluations:');
+    logger.info(`[Cache Invalidation] Cleared ${cleared} evaluation cache entries after evaluation creation (ID: ${newEvaluation.id})`);
 
     // HU-7: Send notification to evaluator
     await sendEvaluationAssignedNotification(newEvaluation.id, evaluator_id, application_id);
 
     res.json(newEvaluation);
   } catch (error) {
-    console.error('❌ Error creating evaluation:', error);
+    logger.error('❌ Error creating evaluation:', error);
     res.status(500).json({
       error: 'Error al crear la evaluación',
       details: error.message
@@ -5116,9 +5481,9 @@ app.post('/api/evaluations', async (req, res) => {
   }
 });
 
-console.log('✅ Notification trigger initialized');
+logger.info('✅ Notification trigger initialized');
 
-console.log('✅ Evaluation management endpoints initialized');
+logger.info('✅ Evaluation management endpoints initialized');
 
 // Cache management endpoints
 app.post('/api/evaluations/cache/clear', (req, res) => {
@@ -5144,11 +5509,11 @@ app.get('/api/evaluations/cache/stats', (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`Evaluation Service running on port ${port}`);
-  console.log('✅ Connection pooling enabled');
-  console.log('✅ Circuit breaker enabled for database queries');
-  console.log('✅ In-memory cache enabled');
-  console.log('Cache endpoints:');
-  console.log('  - POST /api/evaluations/cache/clear');
-  console.log('  - GET  /api/evaluations/cache/stats');
+  logger.info(`Evaluation Service running on port ${port}`);
+  logger.info('✅ Connection pooling enabled');
+  logger.info('✅ Circuit breaker enabled for database queries');
+  logger.info('✅ In-memory cache enabled');
+  logger.info('Cache endpoints:');
+  logger.info('  - POST /api/evaluations/cache/clear');
+  logger.info('  - GET  /api/evaluations/cache/stats');
 });

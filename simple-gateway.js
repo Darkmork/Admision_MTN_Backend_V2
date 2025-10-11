@@ -7,10 +7,11 @@ const PORT = 8080;
 
 // Enable CORS for all routes
 app.use(cors({
-    origin: ['http://localhost:5173', 'http://localhost:3000'],
+    origin: ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:5175', 'http://localhost:3000'],
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'x-correlation-id', 'x-request-time', 'x-timezone', 'x-client-type', 'x-client-version']
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-correlation-id', 'x-request-time', 'x-timezone', 'x-client-type', 'x-client-version', 'x-csrf-token'],
+    optionsSuccessStatus: 204
 }));
 
 // Handle preflight requests - this is handled by the cors middleware above

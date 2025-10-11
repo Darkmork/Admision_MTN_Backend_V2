@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Service label (must be unique) -->
+    <key>Label</key>
+    <string>com.mtn.backup.full</string>
+
+    <!-- Program to run -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/jorgegangale/Library/Mobile Documents/com~apple~CloudDocs/Proyectos/Admision_MTN/Admision_MTN_backend/backup-system/scripts/full-backup.sh</string>
+    </array>
+
+    <!-- Schedule: Daily at 2:00 AM -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>2</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- Logging -->
+    <key>StandardOutPath</key>
+    <string>/tmp/mtn-full-backup.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/mtn-full-backup-error.log</string>
+
+    <!-- Run only when logged in (set to false for system-wide) -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- Environment variables -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <!-- Keep the job loaded -->
+    <key>KeepAlive</key>
+    <false/>
+</dict>
+</plist>

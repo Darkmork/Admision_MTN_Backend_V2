@@ -36,15 +36,15 @@ const externalServiceBreaker = new CircuitBreaker(
 
 // Event listeners
 externalServiceBreaker.on('open', () => {
-  console.error('⚠️ [Circuit Breaker External] OPEN - Too many SMTP failures in notification service');
+  logger.error('⚠️ [Circuit Breaker External] OPEN - Too many SMTP failures in notification service');
 });
 
 externalServiceBreaker.on('halfOpen', () => {
-  console.warn('🔄 [Circuit Breaker External] HALF-OPEN - Testing SMTP recovery');
+  logger.warn('🔄 [Circuit Breaker External] HALF-OPEN - Testing SMTP recovery');
 });
 
 externalServiceBreaker.on('close', () => {
-  console.log('✅ [Circuit Breaker External] CLOSED - Notification service recovered');
+  logger.info('✅ [Circuit Breaker External] CLOSED - Notification service recovered');
 });
 
 externalServiceBreaker.fallback(() => {
@@ -125,10 +125,10 @@ const transporter = nodemailer.createTransport({
 async function verifyEmailConnection() {
   try {
     await transporter.verify();
-    console.log('✅ Conexión Gmail SMTP establecida correctamente');
+    logger.info('✅ Conexión Gmail SMTP establecida correctamente');
     return true;
   } catch (error) {
-    console.error('❌ Error conectando con Gmail SMTP:', error.message);
+    logger.error('❌ Error conectando con Gmail SMTP:', error.message);
     return false;
   }
 }
@@ -320,7 +320,7 @@ app.post('/api/notifications/send', async (req, res) => {
   
   try {
     const timestamp = new Date().toISOString();
-    console.log(`[${timestamp}] [${correlationId}] Processing notification: ${template || type} to ${recipient}`);
+    logger.info(`[${timestamp}] [${correlationId}] Processing notification: ${template || type} to ${recipient}`);
     
     let emailBody = '';
     let emailSubject = subject || 'Notificación - Sistema de Admisión MTN';
@@ -437,8 +437,8 @@ app.post('/api/notifications/send', async (req, res) => {
         // Send email
         const info = await transporter.sendMail(mailOptions);
         
-        console.log(`[${timestamp}] [${correlationId}] Email sent successfully to ${recipient}`);
-        console.log(`[${timestamp}] [${correlationId}] Message ID: ${info.messageId}`);
+        logger.info(`[${timestamp}] [${correlationId}] Email sent successfully to ${recipient}`);
+        logger.info(`[${timestamp}] [${correlationId}] Message ID: ${info.messageId}`);
         
         res.json({
           success: true,
@@ -452,7 +452,7 @@ app.post('/api/notifications/send', async (req, res) => {
         });
         
       } catch (emailError) {
-        console.error(`[${timestamp}] [${correlationId}] Email sending failed:`, emailError.message);
+        logger.error(`[${timestamp}] [${correlationId}] Email sending failed:`, emailError.message);
         
         // Still return success for the API call (notification system shouldn't fail the main operation)
         res.json({
@@ -469,7 +469,7 @@ app.post('/api/notifications/send', async (req, res) => {
       }
     } else {
       // For other notification types (SMS, push, etc.)
-      console.log(`[${timestamp}] [${correlationId}] ${type.toUpperCase()} notification to ${recipient}`);
+      logger.info(`[${timestamp}] [${correlationId}] ${type.toUpperCase()} notification to ${recipient}`);
       
       res.json({
         success: true,
@@ -483,7 +483,7 @@ app.post('/api/notifications/send', async (req, res) => {
     
   } catch (error) {
     const timestamp = new Date().toISOString();
-    console.error(`[${timestamp}] [${correlationId}] Notification processing error:`, error.message);
+    logger.error(`[${timestamp}] [${correlationId}] Notification processing error:`, error.message);
     
     res.status(500).json({
       success: false,
@@ -506,7 +506,7 @@ app.post('/api/email/send', async (req, res) => {
     });
   }
 
-  console.log(`📧 Sending email to: ${to}, template: ${templateType}`);
+  logger.info(`📧 Sending email to: ${to}, template: ${templateType}`);
 
   // Get email template based on templateType
   const emailContent = getEmailTemplate(templateType, data || {});
@@ -528,8 +528,8 @@ app.post('/api/email/send', async (req, res) => {
   try {
     const info = await transporter.sendMail(mailOptions);
 
-    console.log(`✅ Email sent successfully to ${to}`);
-    console.log(`📬 Message ID: ${info.messageId}`);
+    logger.info(`✅ Email sent successfully to ${to}`);
+    logger.info(`📬 Message ID: ${info.messageId}`);
 
     res.json({
       success: true,
@@ -541,13 +541,13 @@ app.post('/api/email/send', async (req, res) => {
     });
 
   } catch (error) {
-    console.error(`❌ Error sending email to ${to}:`, error.message);
+    logger.error(`❌ Error sending email to ${to}:`, error.message);
 
     // Fallback for development
-    console.log(`⚠️ FALLBACK - Email not sent, showing in console`);
-    console.log(`📧 To: ${to}`);
-    console.log(`📋 Template: ${templateType}`);
-    console.log(`📄 Subject: ${emailContent.subject}`);
+    logger.info(`⚠️ FALLBACK - Email not sent, showing in console`);
+    logger.info(`📧 To: ${to}`);
+    logger.info(`📋 Template: ${templateType}`);
+    logger.info(`📄 Subject: ${emailContent.subject}`);
 
     res.json({
       success: true, // Keep as true for development
@@ -900,8 +900,8 @@ app.post('/api/email/send-verification', async (req, res) => {
   // Generate a random 6-digit verification code
   const verificationCode = Math.floor(100000 + Math.random() * 900000);
   
-  console.log('📧 Enviando email de verificación a:', email);
-  console.log('🔑 CÓDIGO DE VERIFICACIÓN:', verificationCode);
+  logger.info('📧 Enviando email de verificación a:', email);
+  logger.info('🔑 CÓDIGO DE VERIFICACIÓN:', verificationCode);
   
   // Configuración del correo
   const mailOptions = {
@@ -946,17 +946,17 @@ app.post('/api/email/send-verification', async (req, res) => {
     // Enviar el correo usando Gmail SMTP
     const info = await transporter.sendMail(mailOptions);
     
-    console.log('✅ Email enviado exitosamente!');
-    console.log('📬 Message ID:', info.messageId);
-    console.log('───────────────────────────────────────');
+    logger.info('✅ Email enviado exitosamente!');
+    logger.info('📬 Message ID:', info.messageId);
+    logger.info('───────────────────────────────────────');
     
     // Mostrar el código de verificación prominentemente en consola
-    console.log('\n' + '='.repeat(60));
-    console.log('🎯 CÓDIGO DE VERIFICACIÓN GENERADO');
-    console.log('='.repeat(60));
-    console.log(`📧 Email: ${email}`);
-    console.log(`🔑 CÓDIGO: ${verificationCode}`);
-    console.log('='.repeat(60) + '\n');
+    logger.info('\n' + '='.repeat(60));
+    logger.info('🎯 CÓDIGO DE VERIFICACIÓN GENERADO');
+    logger.info('='.repeat(60));
+    logger.info(`📧 Email: ${email}`);
+    logger.info(`🔑 CÓDIGO: ${verificationCode}`);
+    logger.info('='.repeat(60) + '\n');
     
     res.json({
       success: true,
@@ -968,7 +968,7 @@ app.post('/api/email/send-verification', async (req, res) => {
     });
     
   } catch (error) {
-    console.error('❌ Error enviando email:', error);
+    logger.error('❌ Error enviando email:', error);
     
     // Almacenar el código de verificación incluso si falla el email (para desarrollo)
     const expirationTime = Date.now() + 10 * 60 * 1000; // 10 minutos
@@ -979,13 +979,13 @@ app.post('/api/email/send-verification', async (req, res) => {
     });
     
     // Fallback: mostrar prominentemente en consola si falla el envío
-    console.log('\n' + '='.repeat(60));
-    console.log('🔄 FALLBACK - CÓDIGO DE VERIFICACIÓN GENERADO');
-    console.log('='.repeat(60));
-    console.log(`📧 Email: ${email}`);
-    console.log(`🔑 CÓDIGO: ${verificationCode}`);
-    console.log('⚠️ Nota: Email no enviado, mostrado en consola');
-    console.log('='.repeat(60) + '\n');
+    logger.info('\n' + '='.repeat(60));
+    logger.info('🔄 FALLBACK - CÓDIGO DE VERIFICACIÓN GENERADO');
+    logger.info('='.repeat(60));
+    logger.info(`📧 Email: ${email}`);
+    logger.info(`🔑 CÓDIGO: ${verificationCode}`);
+    logger.info('⚠️ Nota: Email no enviado, mostrado en consola');
+    logger.info('='.repeat(60) + '\n');
     
     res.json({
       success: true, // Mantener como true para que la aplicación continúe
@@ -1002,7 +1002,7 @@ app.post('/api/email/send-verification', async (req, res) => {
 // Check if email exists endpoint (for frontend usage)
 app.post('/api/email/check-exists', (req, res) => {
   const { email } = req.body;
-  console.log('🔍 Checking email existence:', email);
+  logger.info('🔍 Checking email existence:', email);
   
   // Mock response - normally would check against database
   const exists = email && email.includes('existing');
@@ -1018,7 +1018,7 @@ app.post('/api/email/check-exists', (req, res) => {
 // GET version for query param style
 app.get('/api/email/check-exists', (req, res) => {
   const { email } = req.query;
-  console.log('🔍 Checking email existence (GET):', email);
+  logger.info('🔍 Checking email existence (GET):', email);
   
   const exists = email && email.includes('existing');
   
@@ -1034,7 +1034,7 @@ app.get('/api/email/check-exists', (req, res) => {
 app.post('/api/email/verify-code', (req, res) => {
   const { email, code } = req.body;
   
-  console.log(`🔍 Verificando código para: ${email}, código: ${code}`);
+  logger.info(`🔍 Verificando código para: ${email}, código: ${code}`);
   
   // Validar parámetros requeridos
   if (!email || !code) {
@@ -1049,7 +1049,7 @@ app.post('/api/email/verify-code', (req, res) => {
   const storedCodeData = verificationCodes.get(email);
   
   if (!storedCodeData) {
-    console.log(`❌ No se encontró código para: ${email}`);
+    logger.info(`❌ No se encontró código para: ${email}`);
     return res.status(400).json({
       success: false,
       message: 'No se ha enviado un código de verificación para este email',
@@ -1059,7 +1059,7 @@ app.post('/api/email/verify-code', (req, res) => {
   
   // Verificar expiración
   if (Date.now() > storedCodeData.expiration) {
-    console.log(`⏰ Código expirado para: ${email}`);
+    logger.info(`⏰ Código expirado para: ${email}`);
     verificationCodes.delete(email);
     return res.status(400).json({
       success: false,
@@ -1070,7 +1070,7 @@ app.post('/api/email/verify-code', (req, res) => {
   
   // Verificar número de intentos (máximo 3)
   if (storedCodeData.attempts >= 3) {
-    console.log(`🔒 Demasiados intentos para: ${email}`);
+    logger.info(`🔒 Demasiados intentos para: ${email}`);
     verificationCodes.delete(email);
     return res.status(400).json({
       success: false,
@@ -1084,7 +1084,7 @@ app.post('/api/email/verify-code', (req, res) => {
   const storedCode = storedCodeData.code.toString();
   
   if (providedCode !== storedCode) {
-    console.log(`❌ Código incorrecto para: ${email}. Esperado: ${storedCode}, Recibido: ${providedCode}`);
+    logger.info(`❌ Código incorrecto para: ${email}. Esperado: ${storedCode}, Recibido: ${providedCode}`);
     
     // Incrementar intentos
     storedCodeData.attempts += 1;
@@ -1099,7 +1099,7 @@ app.post('/api/email/verify-code', (req, res) => {
   }
   
   // Código correcto - limpiar el código almacenado
-  console.log(`✅ Código verificado exitosamente para: ${email}`);
+  logger.info(`✅ Código verificado exitosamente para: ${email}`);
   verificationCodes.delete(email);
   
   res.json({
@@ -1116,8 +1116,8 @@ app.post('/api/institutional-emails/document-review/:applicationId', async (req,
   const { applicationId } = req.params;
   const { approvedDocuments = [], rejectedDocuments = [], allApproved = false } = req.body;
 
-  console.log(`📧 Sending document review email for application ${applicationId}`);
-  console.log(`   Approved: ${approvedDocuments.length}, Rejected: ${rejectedDocuments.length}`);
+  logger.info(`📧 Sending document review email for application ${applicationId}`);
+  logger.info(`   Approved: ${approvedDocuments.length}, Rejected: ${rejectedDocuments.length}`);
 
   try {
     // Query database for application and guardian info
@@ -1365,8 +1365,8 @@ app.post('/api/institutional-emails/document-review/:applicationId', async (req,
       });
     });
 
-    console.log(`✅ Document review email sent successfully to ${recipientEmail}`);
-    console.log(`   Message ID: ${emailResult.messageId}`);
+    logger.info(`✅ Document review email sent successfully to ${recipientEmail}`);
+    logger.info(`   Message ID: ${emailResult.messageId}`);
 
     res.json({
       success: true,
@@ -1375,7 +1375,7 @@ app.post('/api/institutional-emails/document-review/:applicationId', async (req,
     });
 
   } catch (error) {
-    console.error('❌ Error sending document review email:', error);
+    logger.error('❌ Error sending document review email:', error);
     res.status(500).json({
       success: false,
       message: 'Error enviando notificación de revisión de documentos',
@@ -1386,7 +1386,7 @@ app.post('/api/institutional-emails/document-review/:applicationId', async (req,
 
 // Email templates endpoint (for InterviewManagement component)
 app.get('/api/email-templates/all', (req, res) => {
-  console.log('📧 Fetching all email templates');
+  logger.info('📧 Fetching all email templates');
 
   const mockTemplates = [
     {
@@ -1480,6 +1480,8 @@ app.get('/api/email-templates/all', (req, res) => {
 // Admin endpoints to manage notification configurations
 
 const { Pool } = require('pg');
+const createLogger = require('./logger');
+const logger = createLogger('notification-service');
 const dbPool = new Pool({
   host: process.env.DB_HOST || 'localhost',
   port: parseInt(process.env.DB_PORT || '5432'),
@@ -1512,7 +1514,7 @@ app.get('/api/notifications/config', async (req, res) => {
 
     res.json(ResponseHelper.ok(result.rows));
   } catch (error) {
-    console.error('❌ Error fetching notification configs:', error);
+    logger.error('❌ Error fetching notification configs:', error);
     res.status(500).json({
       success: false,
       error: 'Error fetching notification configurations',
@@ -1556,7 +1558,7 @@ app.get('/api/notifications/config/:eventType', async (req, res) => {
       message: 'Notification configuration retrieved successfully'
     });
   } catch (error) {
-    console.error('❌ Error fetching notification config:', error);
+    logger.error('❌ Error fetching notification config:', error);
     res.status(500).json({
       success: false,
       error: 'Error fetching notification configuration',
@@ -1636,7 +1638,7 @@ app.put('/api/notifications/config/:id', async (req, res) => {
       });
     }
 
-    console.log(`✅ Notification config updated: ${result.rows[0].event_type}`);
+    logger.info(`✅ Notification config updated: ${result.rows[0].event_type}`);
 
     res.json({
       success: true,
@@ -1644,7 +1646,7 @@ app.put('/api/notifications/config/:id', async (req, res) => {
       message: 'Notification configuration updated successfully'
     });
   } catch (error) {
-    console.error('❌ Error updating notification config:', error);
+    logger.error('❌ Error updating notification config:', error);
     res.status(500).json({
       success: false,
       error: 'Error updating notification configuration',
@@ -1714,7 +1716,7 @@ app.post('/api/notifications/config', async (req, res) => {
       delay_minutes
     ]);
 
-    console.log(`✅ Notification config created: ${event_type}`);
+    logger.info(`✅ Notification config created: ${event_type}`);
 
     res.status(201).json({
       success: true,
@@ -1722,7 +1724,7 @@ app.post('/api/notifications/config', async (req, res) => {
       message: 'Notification configuration created successfully'
     });
   } catch (error) {
-    console.error('❌ Error creating notification config:', error);
+    logger.error('❌ Error creating notification config:', error);
 
     if (error.code === '23505') { // Unique violation
       return res.status(409).json({
@@ -1757,14 +1759,14 @@ app.delete('/api/notifications/config/:id', async (req, res) => {
       });
     }
 
-    console.log(`✅ Notification config deleted: ${result.rows[0].event_type}`);
+    logger.info(`✅ Notification config deleted: ${result.rows[0].event_type}`);
 
     res.json({
       success: true,
       message: 'Notification configuration deleted successfully'
     });
   } catch (error) {
-    console.error('❌ Error deleting notification config:', error);
+    logger.error('❌ Error deleting notification config:', error);
     res.status(500).json({
       success: false,
       error: 'Error deleting notification configuration',
@@ -1798,7 +1800,7 @@ app.patch('/api/notifications/config/:id/toggle', async (req, res) => {
     }
 
     const status = result.rows[0].enabled ? 'enabled' : 'disabled';
-    console.log(`✅ Notification config ${status}: ${result.rows[0].event_type}`);
+    logger.info(`✅ Notification config ${status}: ${result.rows[0].event_type}`);
 
     res.json({
       success: true,
@@ -1806,7 +1808,7 @@ app.patch('/api/notifications/config/:id/toggle', async (req, res) => {
       message: `Notification configuration ${status} successfully`
     });
   } catch (error) {
-    console.error('❌ Error toggling notification config:', error);
+    logger.error('❌ Error toggling notification config:', error);
     res.status(500).json({
       success: false,
       error: 'Error toggling notification configuration',
@@ -1821,7 +1823,7 @@ app.patch('/api/notifications/config/:id/toggle', async (req, res) => {
 app.post('/api/notifications/send-evaluation-assignment', async (req, res) => {
   const { evaluatorEmail, evaluatorName, studentName, studentGrade, evaluationType, applicationId } = req.body;
 
-  console.log(`📧 Sending evaluation assignment email to ${evaluatorEmail} for student ${studentName}`);
+  logger.info(`📧 Sending evaluation assignment email to ${evaluatorEmail} for student ${studentName}`);
 
   const emailHtml = `
     <!DOCTYPE html>
@@ -1885,15 +1887,15 @@ app.post('/api/notifications/send-evaluation-assignment', async (req, res) => {
       });
     });
 
-    console.log(`✅ Evaluation assignment email sent to ${evaluatorEmail}`);
-    console.log(`📬 Message ID: ${emailResult.messageId}`);
+    logger.info(`✅ Evaluation assignment email sent to ${evaluatorEmail}`);
+    logger.info(`📬 Message ID: ${emailResult.messageId}`);
     res.json({ success: true, message: 'Email sent successfully' });
   } catch (error) {
-    console.error('❌ Error sending evaluation assignment email:', error);
+    logger.error('❌ Error sending evaluation assignment email:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
 app.listen(port, () => {
-  console.log(`Notification Service running on port ${port}`);
+  logger.info(`Notification Service running on port ${port}`);
 });

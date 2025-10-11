@@ -8,8 +8,8 @@ on:
   workflow_dispatch:
 
 env:
-  NODE_VERSION: '18.x'
-  POSTGRES_VERSION: '14'
+  NODE_VERSION: '20.x'
+  POSTGRES_VERSION: '15'
 
 jobs:
   # ============================================================================
@@ -18,10 +18,11 @@ jobs:
   backend-nodejs:
     name: Backend (Node.js)
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 15
+
     services:
       postgres:
-        image: postgres:14
+        image: postgres:15
         env:
           POSTGRES_DB: Admisión_MTN_DB
           POSTGRES_USER: admin
@@ -84,9 +85,14 @@ jobs:
   # ============================================================================
   # JOB 2: Frontend Build & Tests
   # ============================================================================
+  # NOTE: Frontend is in separate repository (Darkmork/Admision_MTN_front)
+  # Failures here should not block backend CI
+  # ============================================================================
   frontend:
     name: Frontend (React + TypeScript)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true  # Don't block backend CI on frontend failures
 
     steps:
       - name: Checkout Backend Repository
@@ -151,6 +157,7 @@ jobs:
           VITE_API_BASE_URL: http://localhost:8080
 
       - name: Upload build artifacts
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: frontend-dist
@@ -158,15 +165,19 @@ jobs:
           retention-days: 7
 
   # ============================================================================
-  # JOB 3: Database Migrations Check
+  # JOB 3: Database Schema Verification
+  # ============================================================================
+  # NOTE: Schema creation now handled by scripts/seed-test-data.sh (idempotent)
+  # This job validates that the seed script works correctly
   # ============================================================================
   database:
-    name: Database Migrations
+    name: Database Schema Verification
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 10
+
     services:
       postgres:
-        image: postgres:14
+        image: postgres:15
         env:
           POSTGRES_DB: Admisión_MTN_DB
           POSTGRES_USER: admin
@@ -183,24 +194,60 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Check critical tables exist
+      - name: Run seed script to initialize schema
         env:
           PGPASSWORD: admin123
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_NAME: Admisión_MTN_DB
+          DB_USER: admin
         run: |
-          psql -h localhost -U admin -d "Admisión_MTN_DB" -c "
-          SELECT table_name 
-          FROM information_schema.tables 
-          WHERE table_name IN ('applications', 'users', 'students', 'supporters', 'guardians')
-          " || echo "Tables not yet created (expected for new DB)"
+          echo "🗄️  Running idempotent seed script (creates schema + test data)..."
+          chmod +x scripts/seed-test-data.sh
+          ./scripts/seed-test-data.sh
+          echo "✅ Seed script executed successfully"
 
-      - name: Apply migrations (if any)
+      - name: Verify critical tables exist
         env:
           PGPASSWORD: admin123
         run: |
-          for sql in reports/*.sql; do
-            echo "Applying $sql..."
-            psql -h localhost -U admin -d "Admisión_MTN_DB" -f "$sql" || echo "Migration failed or already applied"
-          done
+          echo "📋 Verifying database schema..."
+          TABLES=$(psql -h localhost -U admin -d "Admisión_MTN_DB" -t -c "
+            SELECT COUNT(*)
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+            AND table_name IN ('users', 'guardians', 'students', 'applications', 'interviewer_schedules');
+          " | xargs)
+
+          if [ "$TABLES" -eq "5" ]; then
+            echo "✅ All 5 critical tables exist"
+          else
+            echo "❌ Expected 5 tables, found $TABLES"
+            echo "Existing tables:"
+            psql -h localhost -U admin -d "Admisión_MTN_DB" -c "
+              SELECT table_name
+              FROM information_schema.tables
+              WHERE table_schema = 'public'
+              ORDER BY table_name;
+            "
+            exit 1
+          fi
+
+      - name: Verify test data was seeded
+        env:
+          PGPASSWORD: admin123
+        run: |
+          echo "📊 Verifying test data..."
+          ADMIN_COUNT=$(psql -h localhost -U admin -d "Admisión_MTN_DB" -t -c "SELECT COUNT(*) FROM users WHERE email = 'jorge.gangale@mtn.cl';" | xargs)
+
+          if [ "$ADMIN_COUNT" -eq "1" ]; then
+            echo "✅ Admin user exists"
+          else
+            echo "❌ Admin user not found"
+            exit 1
+          fi
+
+          echo "✅ Schema verification complete"
 
   # ============================================================================
   # JOB 4: Security Scanning
@@ -208,6 +255,7 @@ jobs:
   security:
     name: Security Scan
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout code
@@ -239,63 +287,31 @@ jobs:
             || echo "✅ No obvious hardcoded passwords found"
 
   # ============================================================================
-  # JOB 5: E2E Tests (Playwright)
+  # JOB 5: Smoke Tests
   # ============================================================================
-  e2e:
-    name: E2E Tests
-    runs-on: ubuntu-latest
-    needs: [backend-nodejs, frontend]
-
-    steps:
-      - name: Checkout Frontend Repository
-        uses: actions/checkout@v4
-        with:
-          repository: Darkmork/Admision_MTN_front
-          path: frontend
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Install dependencies
-        working-directory: frontend
-        run: npm ci
-
-      - name: Install Playwright
-        working-directory: frontend
-        run: npx playwright install --with-deps
-
-      - name: Run E2E tests
-        working-directory: frontend
-        run: npm run e2e || echo "E2E tests not configured yet"
-        continue-on-error: true
-
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: playwright-report
-          path: frontend/playwright-report/
-          retention-days: 7
-
-  # ============================================================================
-  # JOB 6: Smoke Tests
+  # NOTE: Only depends on backend-nodejs (frontend is separate repo, non-blocking)
   # ============================================================================
   smoke-tests:
     name: Smoke Tests
     runs-on: ubuntu-latest
-    needs: [backend-nodejs, frontend]
-    
+    needs: [backend-nodejs]
+    if: always() && needs.backend-nodejs.result == 'success'
+    timeout-minutes: 15
+
     services:
       postgres:
-        image: postgres:14
+        image: postgres:15
         env:
           POSTGRES_DB: Admisión_MTN_DB
           POSTGRES_USER: admin
           POSTGRES_PASSWORD: admin123
         ports:
           - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - name: Checkout code
@@ -305,9 +321,29 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Install NGINX
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nginx
+          nginx -v
+
+      - name: Convert NGINX config for Linux
+        run: |
+          # Create Linux-compatible NGINX config from local-gateway.conf
+          cp local-gateway.conf /tmp/ci-gateway.conf
+
+          # Replace macOS-specific directives with Linux equivalents
+          sed -i 's/use kqueue;/use epoll;/g' /tmp/ci-gateway.conf
+          sed -i 's|/opt/homebrew/etc/nginx/mime.types|/etc/nginx/mime.types|g' /tmp/ci-gateway.conf
+
+          # Test configuration
+          sudo nginx -t -c /tmp/ci-gateway.conf
+          echo "✅ NGINX config converted for Linux"
 
       - name: Start mock services
         run: |
@@ -317,16 +353,38 @@ jobs:
           node mock-notification-service.js > /tmp/notif-service.log 2>&1 &
           node mock-dashboard-service.js > /tmp/dash-service.log 2>&1 &
           node mock-guardian-service.js > /tmp/guardian-service.log 2>&1 &
-          sleep 10
+          echo "✅ Mock services started"
 
-      - name: Health check endpoints
+      - name: Wait for services to be ready
         run: |
-          curl -f http://localhost:8082/health || echo "User service not healthy"
-          curl -f http://localhost:8083/health || echo "Application service not healthy"
-          curl -f http://localhost:8084/health || echo "Evaluation service not healthy"
-          curl -f http://localhost:8085/health || echo "Notification service not healthy"
-          curl -f http://localhost:8086/health || echo "Dashboard service not healthy"
-          curl -f http://localhost:8087/health || echo "Guardian service not healthy"
+          echo "Waiting for services to initialize..."
+          sleep 5
+
+      - name: Start NGINX Gateway
+        run: |
+          sudo nginx -c /tmp/ci-gateway.conf
+          echo "✅ NGINX gateway started on port 8080"
+
+      - name: Verify NGINX is running
+        run: |
+          curl -f http://localhost:8080/gateway/status || (echo "❌ Gateway health check failed" && exit 1)
+          echo "✅ Gateway is responding"
+
+      - name: Seed test data
+        env:
+          PGPASSWORD: admin123
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_NAME: Admisión_MTN_DB
+          DB_USER: admin
+        run: |
+          chmod +x scripts/seed-test-data.sh
+          ./scripts/seed-test-data.sh
+
+      - name: Health check all endpoints
+        run: |
+          chmod +x scripts/ci-health-check.sh
+          ./scripts/ci-health-check.sh
 
       - name: Upload service logs
         if: failure()
@@ -337,13 +395,17 @@ jobs:
           retention-days: 3
 
   # ============================================================================
-  # JOB 7: Build Summary
+  # JOB 6: Build Summary
+  # ============================================================================
+  # NOTE: Frontend and Database are optional (continue-on-error)
+  # Only backend-nodejs, security, and smoke-tests are critical
   # ============================================================================
   summary:
     name: CI Summary
     runs-on: ubuntu-latest
     needs: [backend-nodejs, frontend, database, security, smoke-tests]
     if: always()
+    timeout-minutes: 5
 
     steps:
       - name: Generate summary
@@ -353,15 +415,35 @@ jobs:
           echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
           echo "| Backend (Node.js) | ${{ needs.backend-nodejs.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Frontend | ${{ needs.frontend.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Database | ${{ needs.database.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Frontend (Optional) | ${{ needs.frontend.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Database Schema | ${{ needs.database.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Security | ${{ needs.security.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Smoke Tests | ${{ needs.smoke-tests.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Build Date:** $(date)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Note:** Frontend job is from separate repository and non-blocking" >> $GITHUB_STEP_SUMMARY
 
-      - name: Fail if critical jobs failed
-        if: needs.backend-nodejs.result == 'failure' || needs.frontend.result == 'failure'
+      - name: Fail if critical backend jobs failed
+        if: needs.backend-nodejs.result == 'failure'
         run: |
-          echo "❌ Critical jobs failed"
+          echo "❌ Critical backend job failed"
           exit 1
+
+      - name: Fail if smoke tests failed
+        if: needs.smoke-tests.result == 'failure'
+        run: |
+          echo "❌ Smoke tests failed - system not functional"
+          exit 1
+
+      - name: Warn on frontend issues
+        if: needs.frontend.result == 'failure'
+        run: |
+          echo "⚠️  Frontend build failed (non-blocking)"
+          echo "Frontend is in separate repository - investigate independently"
+
+      - name: Warn on database issues
+        if: needs.database.result == 'failure'
+        run: |
+          echo "⚠️  Database schema verification failed (non-blocking)"
+          echo "Schema creation is also tested in smoke-tests job"

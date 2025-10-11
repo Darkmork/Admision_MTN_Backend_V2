@@ -6,6 +6,8 @@ const bcrypt = require('bcryptjs');
 const CircuitBreaker = require('opossum');
 const crypto = require('crypto');
 const { translateToSpanish } = require('./translations');
+const createLogger = require('./logger');
+const logger = createLogger('user-service');
 const app = express();
 const port = 8082;
 
@@ -33,11 +35,11 @@ function csrfProtection(req, res, next) {
   const cookieToken = req.cookies[CSRF_COOKIE_NAME];
   const headerToken = req.headers[CSRF_HEADER_NAME] || req.headers['csrf-token'];
 
-  console.log(`[CSRF] Validation - Method: ${method}, Cookie: ${cookieToken ? 'present' : 'missing'}, Header: ${headerToken ? 'present' : 'missing'}`);
+  logger.info(`[CSRF] Validation - Method: ${method}, Cookie: ${cookieToken ? 'present' : 'missing'}, Header: ${headerToken ? 'present' : 'missing'}`);
 
   // Validate token match
   if (!cookieToken || !headerToken) {
-    console.log('[CSRF] ❌ CSRF token missing');
+    logger.info('[CSRF] ❌ CSRF token missing');
     return res.status(403).json({
       error: 'CSRF token missing',
       code: 'CSRF_TOKEN_MISSING',
@@ -46,7 +48,7 @@ function csrfProtection(req, res, next) {
   }
 
   if (cookieToken !== headerToken) {
-    console.log('[CSRF] ❌ CSRF token mismatch');
+    logger.info('[CSRF] ❌ CSRF token mismatch');
     return res.status(403).json({
       error: 'CSRF token invalid',
       code: 'CSRF_TOKEN_INVALID',
@@ -54,7 +56,7 @@ function csrfProtection(req, res, next) {
     });
   }
 
-  console.log('[CSRF] ✅ CSRF validation passed');
+  logger.info('[CSRF] ✅ CSRF validation passed');
   next();
 }
 
@@ -67,7 +69,7 @@ const KEY_ROTATION_INTERVAL = 24 * 60 * 60 * 1000; // 24 hours
 
 // Generate RSA key pair
 function generateRSAKeyPair() {
-  console.log('[Encryption] Generating new RSA-2048 key pair...');
+  logger.info('[Encryption] Generating new RSA-2048 key pair...');
   const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', {
     modulusLength: 2048,
     publicKeyEncoding: {
@@ -81,7 +83,7 @@ function generateRSAKeyPair() {
   });
 
   keyRotationTime = Date.now();
-  console.log('[Encryption] RSA key pair generated successfully');
+  logger.info('[Encryption] RSA key pair generated successfully');
 
   return { publicKey, privateKey };
 }
@@ -93,7 +95,7 @@ rsaKeyPair = generateRSAKeyPair();
 setInterval(() => {
   const oldKeyCount = rsaKeyPair ? 1 : 0;
   rsaKeyPair = generateRSAKeyPair();
-  console.log(`[Encryption] Keys rotated. Previous keys: ${oldKeyCount}`);
+  logger.info(`[Encryption] Keys rotated. Previous keys: ${oldKeyCount}`);
 }, KEY_ROTATION_INTERVAL);
 
 // Decryption middleware - decrypts RSA + AES encrypted credentials
@@ -101,7 +103,7 @@ function decryptCredentials(req, res, next) {
   // Skip decryption if request is not encrypted
   if (!req.body.encryptedData || !req.body.encryptedKey) {
     // Allow plain text for backward compatibility during migration
-    console.log('[Encryption] Plain text credentials detected (backward compatibility mode)');
+    logger.info('[Encryption] Plain text credentials detected (backward compatibility mode)');
     return next();
   }
 
@@ -147,11 +149,11 @@ function decryptCredentials(req, res, next) {
     // Replace request body with decrypted credentials
     req.body = credentials;
 
-    console.log('[Encryption] Credentials decrypted successfully');
+    logger.info('[Encryption] Credentials decrypted successfully');
     next();
 
   } catch (error) {
-    console.error('[Encryption] Decryption failed:', error.message);
+    logger.error('[Encryption] Decryption failed:', error.message);
 
     // Rate limiting: Log suspicious decryption attempts
     // In production, implement IP-based rate limiting here
@@ -232,15 +234,15 @@ const writeOperationBreaker = new CircuitBreaker(
 // Event listeners for all breakers
 const setupBreakerEvents = (breaker, name) => {
   breaker.on('open', () => {
-    console.error(`⚠️ [Circuit Breaker ${name}] OPEN - Too many failures in user service`);
+    logger.error(`⚠️ [Circuit Breaker ${name}] OPEN - Too many failures in user service`);
   });
 
   breaker.on('halfOpen', () => {
-    console.warn(`🔄 [Circuit Breaker ${name}] HALF-OPEN - Testing recovery`);
+    logger.warn(`🔄 [Circuit Breaker ${name}] HALF-OPEN - Testing recovery`);
   });
 
   breaker.on('close', () => {
-    console.log(`✅ [Circuit Breaker ${name}] CLOSED - User service recovered`);
+    logger.info(`✅ [Circuit Breaker ${name}] CLOSED - User service recovered`);
   });
 
   breaker.fallback(() => {
@@ -381,7 +383,7 @@ setInterval(() => {
     }
   }
   if (cleaned > 0) {
-    console.log(`[Cache] Cleaned ${cleaned} expired entries`);
+    logger.info(`[Cache] Cleaned ${cleaned} expired entries`);
   }
 }, 300000);
 
@@ -449,7 +451,7 @@ app.get('/health', (req, res) => {
 // Public endpoint - generates CSRF token and sets csrf_cookie
 app.get('/api/auth/csrf-token', (req, res) => {
   try {
-    console.log('[CSRF] Token generation request received');
+    logger.info('[CSRF] Token generation request received');
 
     // Generate CSRF token
     const csrfToken = generateCsrfToken();
@@ -463,7 +465,7 @@ app.get('/api/auth/csrf-token', (req, res) => {
       maxAge: 3600000         // 1 hour in milliseconds
     });
 
-    console.log('[CSRF] Token generated successfully:', csrfToken.substring(0, 20) + '...');
+    logger.info('[CSRF] Token generated successfully:', csrfToken.substring(0, 20) + '...');
 
     res.json({
       success: true,
@@ -478,7 +480,7 @@ app.get('/api/auth/csrf-token', (req, res) => {
       }
     });
   } catch (error) {
-    console.error('[CSRF] ❌ Error generating CSRF token:', error);
+    logger.error('[CSRF] ❌ Error generating CSRF token:', error);
     res.status(500).json({
       success: false,
       error: 'Error generating CSRF token',
@@ -491,7 +493,7 @@ app.get('/api/auth/csrf-token', (req, res) => {
 // Public endpoint - returns RSA public key for client-side encryption
 app.get('/api/auth/public-key', (req, res) => {
   try {
-    console.log('[Encryption] Public key request received');
+    logger.info('[Encryption] Public key request received');
 
     if (!rsaKeyPair || !rsaKeyPair.publicKey) {
       return res.status(503).json({
@@ -516,9 +518,9 @@ app.get('/api/auth/public-key', (req, res) => {
       message: 'Use this public key to encrypt login credentials on the client side'
     });
 
-    console.log('[Encryption] Public key sent successfully');
+    logger.info('[Encryption] Public key sent successfully');
   } catch (error) {
-    console.error('[Encryption] ❌ Error sending public key:', error);
+    logger.error('[Encryption] ❌ Error sending public key:', error);
     res.status(500).json({
       success: false,
       error: 'Error retrieving public key',
@@ -896,7 +898,7 @@ app.get('/api/users', authenticateToken, async (req, res) => {
       count: users.length
     });
   } catch (error) {
-    console.error('❌ Error fetching users:', error);
+    logger.error('❌ Error fetching users:', error);
     res.status(500).json({
       success: false,
       error: 'Error al obtener usuarios',
@@ -917,10 +919,10 @@ const optionalCsrfProtection = (req, res, next) => {
 app.post('/api/auth/login', decryptCredentials, optionalCsrfProtection, async (req, res) => {
   const { email, password } = req.body;
 
-  // Logging removed for security - console.log('🔐 LOGIN ATTEMPT:', { email, password: password ? '[PROTECTED]' : '[EMPTY]' });
+  // Logging removed for security - logger.info('🔐 LOGIN ATTEMPT:', { email, password: password ? '[PROTECTED]' : '[EMPTY]' });
 
   if (!email || !password) {
-    // Logging removed for security - console.log('❌ Missing email or password');
+    // Logging removed for security - logger.info('❌ Missing email or password');
     return res.status(400).json({
       success: false,
       error: 'Email y contraseña son obligatorios'
@@ -936,7 +938,7 @@ app.post('/api/auth/login', decryptCredentials, optionalCsrfProtection, async (r
     );
 
     if (userQuery.rows.length === 0) {
-      // Logging removed for security - console.log('❌ User not found:', email);
+      // Logging removed for security - logger.info('❌ User not found:', email);
       return res.status(401).json({
         success: false,
         error: 'Credenciales inválidas'
@@ -944,11 +946,11 @@ app.post('/api/auth/login', decryptCredentials, optionalCsrfProtection, async (r
     }
 
     const user = userQuery.rows[0];
-    // Logging removed for security - console.log('👤 User found:', { id: user.id, email: user.email, role: user.role, active: user.active });
+    // Logging removed for security - logger.info('👤 User found:', { id: user.id, email: user.email, role: user.role, active: user.active });
 
     // Verificar si el usuario está activo
     if (!user.active) {
-      // Logging removed for security - console.log('❌ User is inactive:', email);
+      // Logging removed for security - logger.info('❌ User is inactive:', email);
       return res.status(401).json({
         success: false,
         error: 'Usuario inactivo'
@@ -957,10 +959,10 @@ app.post('/api/auth/login', decryptCredentials, optionalCsrfProtection, async (r
 
     // Verificar contraseña usando bcrypt
     const isValidPassword = await bcrypt.compare(password, user.password);
-    // Logging removed for security - console.log('🔒 Password verification:', isValidPassword ? 'SUCCESS' : 'FAILED');
+    // Logging removed for security - logger.info('🔒 Password verification:', isValidPassword ? 'SUCCESS' : 'FAILED');
 
     if (!isValidPassword) {
-      // Logging removed for security - console.log('❌ Invalid password for user:', email);
+      // Logging removed for security - logger.info('❌ Invalid password for user:', email);
       return res.status(401).json({
         success: false,
         error: 'Credenciales inválidas'
@@ -997,7 +999,7 @@ app.post('/api/auth/login', decryptCredentials, optionalCsrfProtection, async (r
     const signature = "mock-signature"; // In real app would be HMAC
     const token = `${header}.${payload}.${signature}`;
 
-    // Logging removed for security - console.log('✅ Login successful for user:', { id: user.id, email: user.email, role: user.role });
+    // Logging removed for security - logger.info('✅ Login successful for user:', { id: user.id, email: user.email, role: user.role });
 
     const responseData = {
       success: true,
@@ -1054,7 +1056,7 @@ app.post('/api/auth/register', decryptCredentials, csrfProtection, async (req, r
       if (email === 'test@example.com' || email === 'jorge.gangale@gmail.com') {
         // Delete the old user from database
         await client.query('DELETE FROM users WHERE email = $1', [email.toLowerCase().trim()]);
-        // Logging removed for security - console.log(`🗑️ Removed existing test user: ${email}`);
+        // Logging removed for security - logger.info(`🗑️ Removed existing test user: ${email}`);
       } else {
         return res.status(409).json({
           success: false,
@@ -1089,7 +1091,7 @@ app.post('/api/auth/register', decryptCredentials, csrfProtection, async (req, r
     ]);
 
     const newUser = insertResult.rows[0];
-    // Logging removed for security - console.log('✅ New user saved to database:', newUser.email);
+    // Logging removed for security - logger.info('✅ New user saved to database:', newUser.email);
     
     // Also add to in-memory users array for immediate compatibility with existing endpoints
     const memoryUser = {
@@ -1205,7 +1207,7 @@ app.put('/api/users/:id', csrfProtection, authenticateToken, async (req, res) =>
   const client = await dbPool.connect();
 
   try {
-    console.log('📝 Datos recibidos para actualizar usuario:', JSON.stringify(req.body, null, 2));
+    logger.info('📝 Datos recibidos para actualizar usuario:', JSON.stringify(req.body, null, 2));
 
     // Check if user exists in DATABASE first
     const currentUserQuery = await client.query(
@@ -1281,13 +1283,18 @@ app.put('/api/users/:id', csrfProtection, authenticateToken, async (req, res) =>
       updatedUser.educationalLevel || null
     ]);
 
-    console.log(`✅ Usuario actualizado en base de datos: ${updatedUser.firstName} ${updatedUser.lastName}`);
+    logger.info(`✅ Usuario actualizado en base de datos: ${updatedUser.firstName} ${updatedUser.lastName}`);
 
     // Update in-memory array for consistency (if user exists there)
     const userIndex = users.findIndex(u => u.id === userId);
     if (userIndex !== -1) {
       users[userIndex] = updatedUser;
     }
+
+    // ============= CACHE INVALIDATION =============
+    // Invalidate all user-related caches after successful update
+    const cleared = userCache.clear('users:');
+    logger.info(`[Cache Invalidation] Cleared ${cleared} user cache entries after user update (ID: ${userId})`);
 
     res.json({
       success: true,
@@ -1296,7 +1303,7 @@ app.put('/api/users/:id', csrfProtection, authenticateToken, async (req, res) =>
     });
 
   } catch (error) {
-    console.error('❌ Error actualizando usuario:', error);
+    logger.error('❌ Error actualizando usuario:', error);
     res.status(500).json({
       success: false,
       error: 'Error updating user in database'
@@ -1339,6 +1346,11 @@ app.delete('/api/users/:id', csrfProtection, authenticateToken, async (req, res)
         users.splice(userIndex, 1);
       }
 
+      // ============= CACHE INVALIDATION =============
+      // Invalidate all user-related caches after successful deletion
+      const cleared = userCache.clear('users:');
+      logger.info(`[Cache Invalidation] Cleared ${cleared} user cache entries after user deletion (ID: ${userId})`);
+
       res.json({
         success: true,
         message: 'Usuario eliminado correctamente'
@@ -1357,7 +1369,7 @@ app.delete('/api/users/:id', csrfProtection, authenticateToken, async (req, res)
       throw dbError;
     }
   } catch (error) {
-    console.error('Error deleting user:', error);
+    logger.error('Error deleting user:', error);
     res.status(500).json({
       success: false,
       error: 'Error al eliminar el usuario',
@@ -1424,29 +1436,34 @@ app.post('/api/users', csrfProtection, authenticateToken, async (req, res) => {
       newUser.subject
     ]);
 
-    console.log(`✅ Usuario ${result.rows[0].id} guardado en base de datos`);
+    logger.info(`✅ Usuario ${result.rows[0].id} guardado en base de datos`);
     userSavedToDB = true;
 
     // ONLY add to in-memory array if DB save succeeded
     users.push(newUser);
+
+    // ============= CACHE INVALIDATION =============
+    // Invalidate all user-related caches after successful creation
+    const cleared = userCache.clear('users:');
+    logger.info(`[Cache Invalidation] Cleared ${cleared} user cache entries after user creation (ID: ${newUser.id})`);
 
     // Create schedules for evaluator roles ONLY if user was successfully saved to database
     const evaluatorRoles = ['TEACHER_LANGUAGE', 'TEACHER_MATHEMATICS', 'TEACHER_ENGLISH', 'TEACHER', 'COORDINATOR', 'CYCLE_DIRECTOR', 'PSYCHOLOGIST', 'ADMIN'];
     if (userSavedToDB && evaluatorRoles.includes(newUser.role)) {
       try {
         if (req.body.customSchedules && Array.isArray(req.body.customSchedules) && req.body.customSchedules.length > 0) {
-          console.log(`🗓️ Creando horarios personalizados para ${newUser.role}: ${newUser.fullName}`);
+          logger.info(`🗓️ Creando horarios personalizados para ${newUser.role}: ${newUser.fullName}`);
           await createCustomSchedulesForUser(newUser.id, req.body.customSchedules);
         } else {
-          console.log(`🗓️ Creando horarios por defecto para ${newUser.role}: ${newUser.fullName}`);
+          logger.info(`🗓️ Creando horarios por defecto para ${newUser.role}: ${newUser.fullName}`);
           await createDefaultScheduleForUser(newUser.id);
         }
       } catch (scheduleError) {
-        console.error('❌ Error creando horarios para usuario:', scheduleError);
+        logger.error('❌ Error creando horarios para usuario:', scheduleError);
         // Don't fail user creation if schedules fail
       }
     } else if (!userSavedToDB && evaluatorRoles.includes(newUser.role)) {
-      console.log(`⚠️ No se crearon horarios para ${newUser.role}: ${newUser.fullName} - usuario no guardado en base de datos`);
+      logger.info(`⚠️ No se crearon horarios para ${newUser.role}: ${newUser.fullName} - usuario no guardado en base de datos`);
     }
 
     res.status(201).json({
@@ -1456,7 +1473,7 @@ app.post('/api/users', csrfProtection, authenticateToken, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Error creating user:', error);
+    logger.error('❌ Error creating user:', error);
 
     // Handle duplicate key errors with user-friendly messages
     if (error.code === '23505') { // PostgreSQL unique violation
@@ -1519,10 +1536,10 @@ async function createDefaultScheduleForUser(userId) {
       ]);
     }
 
-    console.log(`✅ Horarios por defecto creados para usuario ${userId}`);
+    logger.info(`✅ Horarios por defecto creados para usuario ${userId}`);
 
   } catch (error) {
-    console.error('❌ Error creando horarios por defecto:', error);
+    logger.error('❌ Error creando horarios por defecto:', error);
     // No lanzamos el error para no fallar la creación del usuario
   } finally {
     client.release();
@@ -1535,12 +1552,12 @@ async function createCustomSchedulesForUser(userId, customSchedules) {
   try {
     const currentYear = new Date().getFullYear();
 
-    console.log(`🗓️ Creando ${customSchedules.length} horarios personalizados para usuario ${userId}`);
+    logger.info(`🗓️ Creando ${customSchedules.length} horarios personalizados para usuario ${userId}`);
 
     for (const schedule of customSchedules) {
       // Validate required fields
       if (!schedule.dayOfWeek || !schedule.startTime || !schedule.endTime) {
-        console.warn('⚠️ Horario inválido (faltan campos requeridos):', schedule);
+        logger.warn('⚠️ Horario inválido (faltan campos requeridos):', schedule);
         continue;
       }
 
@@ -1565,13 +1582,13 @@ async function createCustomSchedulesForUser(userId, customSchedules) {
         notes
       ]);
 
-      console.log(`✅ Horario creado: ${schedule.dayOfWeek} ${startTime}-${endTime}`);
+      logger.info(`✅ Horario creado: ${schedule.dayOfWeek} ${startTime}-${endTime}`);
     }
 
-    console.log(`✅ Todos los horarios personalizados creados para usuario ${userId}`);
+    logger.info(`✅ Todos los horarios personalizados creados para usuario ${userId}`);
 
   } catch (error) {
-    console.error('❌ Error creando horarios personalizados:', error);
+    logger.error('❌ Error creando horarios personalizados:', error);
     // No lanzamos el error para no fallar la creación del usuario
   } finally {
     client.release();
@@ -1636,7 +1653,7 @@ app.get('/api/users/me', authenticateToken, async (req, res) => {
       user: userProfile
     });
   } catch (error) {
-    console.error('Error fetching user profile:', error);
+    logger.error('Error fetching user profile:', error);
     res.status(500).json({
       success: false,
       error: 'Error al obtener perfil de usuario'
@@ -1734,7 +1751,7 @@ app.get('/api/users/staff', authenticateToken, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Error fetching staff users:', error);
+    logger.error('❌ Error fetching staff users:', error);
     res.status(500).json({
       success: false,
       error: 'Error al obtener personal del colegio',
@@ -1825,7 +1842,7 @@ app.get('/api/users/guardians', authenticateToken, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Error fetching guardian users:', error);
+    logger.error('❌ Error fetching guardian users:', error);
     res.status(500).json({
       success: false,
       error: 'Error al obtener apoderados',
@@ -1844,10 +1861,10 @@ app.get('/api/users/roles', (req, res) => {
   const cacheKey = 'users:roles';
   const cached = userCache.get(cacheKey);
   if (cached) {
-    console.log('[Cache HIT] users:roles');
+    logger.info('[Cache HIT] users:roles');
     return res.json(cached);
   }
-  console.log('[Cache MISS] users:roles');
+  logger.info('[Cache MISS] users:roles');
 
   const roles = [
     'ADMIN',
@@ -1894,6 +1911,11 @@ app.put('/api/users/:id/deactivate', authenticateToken, (req, res) => {
   users[userIndex].active = false;
   users[userIndex].updatedAt = new Date().toISOString();
 
+  // ============= CACHE INVALIDATION =============
+  // Invalidate all user-related caches after deactivation
+  const cleared = userCache.clear('users:');
+  logger.info(`[Cache Invalidation] Cleared ${cleared} user cache entries after user deactivation (ID: ${userId})`);
+
   res.json({
     success: true,
     message: 'Usuario desactivado exitosamente'
@@ -1914,6 +1936,11 @@ app.put('/api/users/:id/activate', authenticateToken, (req, res) => {
 
   users[userIndex].active = true;
   users[userIndex].updatedAt = new Date().toISOString();
+
+  // ============= CACHE INVALIDATION =============
+  // Invalidate all user-related caches after activation
+  const cleared = userCache.clear('users:');
+  logger.info(`[Cache Invalidation] Cleared ${cleared} user cache entries after user activation (ID: ${userId})`);
 
   res.json(users[userIndex]);
 });
@@ -1962,14 +1989,14 @@ app.get('/api/users/public/school-staff', async (req, res) => {
   const cacheKey = 'users:school-staff';
   const cached = userCache.get(cacheKey);
   if (cached) {
-    console.log('[Cache HIT] users:school-staff');
+    logger.info('[Cache HIT] users:school-staff');
     return res.json(cached);
   }
-  console.log('[Cache MISS] users:school-staff');
+  logger.info('[Cache MISS] users:school-staff');
 
   const client = await dbPool.connect();
   try {
-    console.log('🔍 Public: Fetching real school staff from database...');
+    logger.info('🔍 Public: Fetching real school staff from database...');
 
     const query = `
       SELECT
@@ -1993,7 +2020,7 @@ app.get('/api/users/public/school-staff', async (req, res) => {
     const result = await client.query(query);
     const schoolStaff = result.rows;
 
-    console.log(`✅ Found ${schoolStaff.length} real school staff members`);
+    logger.info(`✅ Found ${schoolStaff.length} real school staff members`);
 
     // Return in the format expected by userService
     const staffData = {
@@ -2009,7 +2036,7 @@ app.get('/api/users/public/school-staff', async (req, res) => {
     res.json(staffData);
 
   } catch (error) {
-    console.error('❌ Error fetching real school staff:', error);
+    logger.error('❌ Error fetching real school staff:', error);
     res.status(500).json({
       success: false,
       error: 'Error interno del servidor',
@@ -2044,10 +2071,10 @@ app.get('/api/users/cache/stats', (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`User Service running on port ${port}`);
-  console.log('✅ Connection pooling enabled');
-  console.log('✅ In-memory cache enabled');
-  console.log('Cache endpoints:');
-  console.log('  - POST /api/users/cache/clear');
-  console.log('  - GET  /api/users/cache/stats');
+  logger.info(`User Service running on port ${port}`);
+  logger.info('✅ Connection pooling enabled');
+  logger.info('✅ In-memory cache enabled');
+  logger.info('Cache endpoints:');
+  logger.info('  - POST /api/users/cache/clear');
+  logger.info('  - GET  /api/users/cache/stats');
 });

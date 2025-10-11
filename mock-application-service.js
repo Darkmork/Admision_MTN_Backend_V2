@@ -6,6 +6,8 @@ const axios = require('axios');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const createLogger = require('./logger');
+const logger = createLogger('application-service');
 const PDFDocument = require('pdfkit');
 const { translateToSpanish } = require('./translations');
 const { validateRUT } = require('./utils/validateRUT');
@@ -101,30 +103,30 @@ const externalServiceBreaker = new CircuitBreaker(
 // Event listeners for all breakers
 const setupBreakerEvents = (breaker, name) => {
   breaker.on('open', () => {
-    console.error(`⚠️ [Circuit Breaker ${name}] OPEN - Too many failures in application service`);
+    logger.error(`⚠️ [Circuit Breaker ${name}] OPEN - Too many failures in application service`);
   });
 
   breaker.on('halfOpen', () => {
-    console.warn(`🔄 [Circuit Breaker ${name}] HALF-OPEN - Testing recovery`);
+    logger.warn(`🔄 [Circuit Breaker ${name}] HALF-OPEN - Testing recovery`);
   });
 
   breaker.on('close', () => {
-    console.log(`✅ [Circuit Breaker ${name}] CLOSED - Application service recovered`);
+    logger.info(`✅ [Circuit Breaker ${name}] CLOSED - Application service recovered`);
   });
 
   breaker.on('failure', (error) => {
-    console.error(`❌ [Circuit Breaker ${name}] FAILURE:`, {
+    logger.error(`❌ [Circuit Breaker ${name}] FAILURE:`, {
       message: error.message,
       stack: error.stack?.substring(0, 300)
     });
   });
 
   breaker.on('timeout', () => {
-    console.error(`⏱️ [Circuit Breaker ${name}] TIMEOUT exceeded`);
+    logger.error(`⏱️ [Circuit Breaker ${name}] TIMEOUT exceeded`);
   });
 
   breaker.fallback(() => {
-    console.warn(`🔄 [Circuit Breaker ${name}] Fallback triggered - returning empty result`);
+    logger.warn(`🔄 [Circuit Breaker ${name}] Fallback triggered - returning empty result`);
     // Return null instead of throwing to allow circuit breaker to eventually close
     // The endpoint will check for null and handle it appropriately
     return { rows: [] };  // Return empty result set for database queries
@@ -293,14 +295,14 @@ const authenticateToken = (req, res, next) => {
         lastName: payload.lastName,
         role: payload.role || 'APODERADO'
       };
-      console.log('🔐 Authenticated user:', req.user.email);
+      logger.info('🔐 Authenticated user:', req.user.email);
       next();
     } catch (error) {
-      console.log('❌ Invalid token format:', error.message);
+      logger.info('❌ Invalid token format:', error.message);
       return res.status(401).json({ error: 'Token inválido' });
     }
   } else {
-    console.log('❌ No token provided or invalid format');
+    logger.info('❌ No token provided or invalid format');
     return res.status(401).json({ error: 'Token de acceso requerido' });
   }
 };
@@ -312,12 +314,12 @@ app.use((req, res, next) => {
   
   req.correlationId = correlationId;
   
-  console.log(`[${timestamp}] [${correlationId}] ${req.method} ${req.url} - Started`);
+  logger.info(`[${timestamp}] [${correlationId}] ${req.method} ${req.url} - Started`);
   
   const originalSend = res.send;
   res.send = function(data) {
     const endTimestamp = new Date().toISOString();
-    console.log(`[${endTimestamp}] [${correlationId}] ${req.method} ${req.url} - Completed ${res.statusCode}`);
+    logger.info(`[${endTimestamp}] [${correlationId}] ${req.method} ${req.url} - Completed ${res.statusCode}`);
     return originalSend.call(this, data);
   };
   
@@ -328,7 +330,7 @@ app.use((req, res, next) => {
 const sendNotification = async (type, data, correlationId) => {
   try {
     const timestamp = new Date().toISOString();
-    console.log(`[${timestamp}] [${correlationId}] Sending ${type} notification to ${data.recipient}`);
+    logger.info(`[${timestamp}] [${correlationId}] Sending ${type} notification to ${data.recipient}`);
     
     let notificationData;
     
@@ -382,7 +384,7 @@ const sendNotification = async (type, data, correlationId) => {
         break;
         
       default:
-        console.log(`[${timestamp}] [${correlationId}] Unknown notification type: ${type}`);
+        logger.info(`[${timestamp}] [${correlationId}] Unknown notification type: ${type}`);
         return { success: false, error: 'Unknown notification type' };
     }
     
@@ -395,12 +397,12 @@ const sendNotification = async (type, data, correlationId) => {
       timeout: 5000
     });
     
-    console.log(`[${timestamp}] [${correlationId}] Notification sent successfully: ${type}`);
+    logger.info(`[${timestamp}] [${correlationId}] Notification sent successfully: ${type}`);
     return { success: true, data: response.data };
     
   } catch (error) {
     const timestamp = new Date().toISOString();
-    console.error(`[${timestamp}] [${correlationId}] Failed to send ${type} notification:`, error.message);
+    logger.error(`[${timestamp}] [${correlationId}] Failed to send ${type} notification:`, error.message);
     
     // Don't fail the main operation if notification fails
     return { success: false, error: error.message };
@@ -431,7 +433,7 @@ const processNotificationQueue = async () => {
   
   const timestamp = new Date().toISOString();
   const batchId = `batch-${Date.now()}`;
-  console.log(`[${timestamp}] [${batchId}] Processing ${notificationQueue.length} queued notifications`);
+  logger.info(`[${timestamp}] [${batchId}] Processing ${notificationQueue.length} queued notifications`);
   
   const currentQueue = [...notificationQueue];
   notificationQueue = []; // Clear queue
@@ -445,7 +447,7 @@ const processNotificationQueue = async () => {
   const successful = results.filter(r => r.status === 'fulfilled' && r.value.success).length;
   const failed = results.length - successful;
   
-  console.log(`[${timestamp}] [${batchId}] Batch complete: ${successful} sent, ${failed} failed`);
+  logger.info(`[${timestamp}] [${batchId}] Batch complete: ${successful} sent, ${failed} failed`);
 };
 
 // Process notification queue every 30 seconds
@@ -464,7 +466,7 @@ const queueNotification = (type, data, correlationId) => {
 // Global error handler
 const handleDatabaseError = (error, correlationId) => {
   const timestamp = new Date().toISOString();
-  console.error(`[${timestamp}] [${correlationId}] Database Error:`, {
+  logger.error(`[${timestamp}] [${correlationId}] Database Error:`, {
     message: error.message,
     code: error.code,
     detail: error.detail,
@@ -550,15 +552,15 @@ const validateApplicationInput = (req, res, next) => {
   const errors = [];
   
   // 🔍 DEBUG: Log incoming data
-  console.log('📥 VALIDACIÓN INICIADA - Datos recibidos:');
-  console.log('- firstName:', body.firstName);
-  console.log('- lastName:', body.lastName);
-  console.log('- paternalLastName:', body.paternalLastName);
-  console.log('- rut:', body.rut);
-  console.log('- grade:', body.grade);
-  console.log('- parent1Name:', body.parent1Name);
-  console.log('- parent1Phone:', body.parent1Phone);
-  console.log('- Todos los campos:', JSON.stringify(body, null, 2));
+  logger.info('📥 VALIDACIÓN INICIADA - Datos recibidos:');
+  logger.info('- firstName:', body.firstName);
+  logger.info('- lastName:', body.lastName);
+  logger.info('- paternalLastName:', body.paternalLastName);
+  logger.info('- rut:', body.rut);
+  logger.info('- grade:', body.grade);
+  logger.info('- parent1Name:', body.parent1Name);
+  logger.info('- parent1Phone:', body.parent1Phone);
+  logger.info('- Todos los campos:', JSON.stringify(body, null, 2));
   
   // Student validation (using flat structure from frontend)
   if (!body.firstName || body.firstName.trim().length < 2) {
@@ -620,11 +622,11 @@ const validateApplicationInput = (req, res, next) => {
   }
   
   if (errors.length > 0) {
-    console.log('❌ ERRORES DE VALIDACIÓN ENCONTRADOS:');
+    logger.info('❌ ERRORES DE VALIDACIÓN ENCONTRADOS:');
     errors.forEach((error, index) => {
-      console.log(`   ${index + 1}. ${error}`);
+      logger.info(`   ${index + 1}. ${error}`);
     });
-    console.log('📤 Enviando respuesta 400 con errores:', errors);
+    logger.info('📤 Enviando respuesta 400 con errores:', errors);
     
     return res.status(400).json({
       success: false,
@@ -633,7 +635,7 @@ const validateApplicationInput = (req, res, next) => {
     });
   }
   
-  console.log('✅ VALIDACIÓN EXITOSA - Continuando con el procesamiento...');
+  logger.info('✅ VALIDACIÓN EXITOSA - Continuando con el procesamiento...');
   
   // Sanitize inputs (using frontend field names)
   req.body.firstName = sanitizeString(req.body.firstName, 100);
@@ -726,6 +728,7 @@ app.get('/api/applications', async (req, res) => {
         s.grade_applied as student_grade,
         s.current_school as student_current_school,
         s.address as student_address,
+        s.admission_preference as student_admission_preference,
 
         -- Father information
         f.id as father_id,
@@ -1170,6 +1173,7 @@ app.get('/api/applications/search', async (req, res) => {
         s.grade_applied as student_grade,
         s.current_school as student_current_school,
         s.address as student_address,
+        s.admission_preference as student_admission_preference,
 
         -- Father information
         f.id as father_id,
@@ -1213,7 +1217,7 @@ app.get('/api/applications/search', async (req, res) => {
     try {
       result = await mediumQueryBreaker.fire(client, query, params);
     } catch (queryError) {
-      console.error('❌ Main query error details:', {
+      logger.error('❌ Main query error details:', {
         error: queryError.message,
         stack: queryError.stack,
         query: query.substring(0, 200) + '...',
@@ -1283,7 +1287,7 @@ app.get('/api/applications/search', async (req, res) => {
     }));
 
   } catch (error) {
-    console.error('❌ Error in enhanced application search:', error);
+    logger.error('❌ Error in enhanced application search:', error);
 
     if (error.message && error.message.includes('breaker')) {
       return res.status(503).json(fail('Service temporarily unavailable - circuit breaker open', {
@@ -1466,7 +1470,7 @@ app.get('/api/applications/public/all', async (req, res) => {
     });
   } catch (error) {
     const timestamp = new Date().toISOString();
-    console.error(`[${timestamp}] Database error in /api/applications/public/all:`, error.message);
+    logger.error(`[${timestamp}] Database error in /api/applications/public/all:`, error.message);
     // Fallback to mock data
     const mockApplications = [
       createCompleteApplication(1, sofiaData, 'APPROVED', 5),
@@ -1524,10 +1528,10 @@ app.get('/api/applications/stats', authenticateToken, async (req, res) => {
       stats[status] = parseInt(row.count);
     });
 
-    console.log('📊 Application stats:', stats);
+    logger.info('📊 Application stats:', stats);
     res.json(stats);
   } catch (error) {
-    console.error('❌ Error getting application stats:', error);
+    logger.error('❌ Error getting application stats:', error);
     res.status(500).json({
       success: false,
       error: 'Error al obtener estadísticas de postulaciones'
@@ -1541,7 +1545,7 @@ app.get('/api/applications/stats', authenticateToken, async (req, res) => {
 app.get('/api/applications/my-applications', authenticateToken, async (req, res) => {
   const client = await dbPool.connect();
   try {
-    console.log(`🔍 Getting applications for user: ${req.user.email}`);
+    logger.info(`🔍 Getting applications for user: ${req.user.email}`);
 
     // Get real applications from database filtered by current user's email
     const applicationsQuery = await client.query(`
@@ -1663,7 +1667,7 @@ app.get('/api/applications/my-applications', authenticateToken, async (req, res)
     res.json(applications);
   } catch (error) {
     const timestamp = new Date().toISOString();
-    console.error(`[${timestamp}] Database error in /api/applications/my-applications:`, error.message);
+    logger.error(`[${timestamp}] Database error in /api/applications/my-applications:`, error.message);
     // Fallback to mock data
     const myApplications = [
       createCompleteApplication(1, sofiaData, 'IN_PROGRESS', 3),
@@ -1725,6 +1729,7 @@ app.get('/api/applications/:id', async (req, res) => {
         s.grade_applied as student_grade,
         s.current_school as student_current_school,
         s.address as student_address,
+        s.admission_preference as student_admission_preference,
         s.email as student_email,
         s.additional_notes as student_notes,
 
@@ -1817,7 +1822,10 @@ app.get('/api/applications/:id', async (req, res) => {
         d.file_name,
         d.original_name,
         d.file_size,
-        d.is_required
+        d.is_required,
+        d.approval_status,
+        d.reviewed_at,
+        d.reviewed_by
       FROM documents d
       WHERE d.application_id = $1
       ORDER BY d.created_at DESC
@@ -1827,7 +1835,7 @@ app.get('/api/applications/:id', async (req, res) => {
     try {
       documentsResult = await client.query(documentsQuery, [applicationId]);
     } catch (error) {
-      console.log('Documents table might not exist, using mock data');
+      logger.info('Documents table might not exist, using mock data');
       documentsResult = { rows: [] };
     }
     
@@ -1844,7 +1852,9 @@ app.get('/api/applications/:id', async (req, res) => {
       student: {
         id: row.student_id,
         firstName: row.student_first_name,
-        lastName: `${row.student_paternal_last_name} ${row.student_maternal_last_name || ''}`.trim(),
+        paternalLastName: row.student_paternal_last_name,
+        maternalLastName: row.student_maternal_last_name || '',
+        lastName: `${row.student_paternal_last_name} ${row.student_maternal_last_name || ''}`.trim(), // Apellido completo para compatibilidad
         fullName: `${row.student_first_name} ${row.student_paternal_last_name} ${row.student_maternal_last_name || ''}`.trim(),
         rut: row.student_rut,
         birthDate: row.student_birth_date,
@@ -1918,7 +1928,10 @@ app.get('/api/applications/:id', async (req, res) => {
             uploadDate: doc.upload_date,
             filePath: doc.file_path,
             fileSize: doc.file_size,
-            isRequired: doc.is_required
+            isRequired: doc.is_required,
+            approval_status: doc.approval_status,
+            reviewed_at: doc.reviewed_at,
+            reviewed_by: doc.reviewed_by
           }))
         : [],
       
@@ -1974,8 +1987,8 @@ app.post('/api/applications', authenticateToken, validateApplicationInput, async
         INSERT INTO students (
           first_name, paternal_last_name, maternal_last_name, rut,
           birth_date, grade_applied, current_school, address,
-          email, school_applied, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+          email, school_applied, admission_preference, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
         RETURNING id
       `;
 
@@ -1989,7 +2002,8 @@ app.post('/api/applications', authenticateToken, validateApplicationInput, async
         body.currentSchool || null,
         body.studentAddress || null,
         body.studentEmail || null,
-        body.schoolApplied || 'MONTE_TABOR' // default school
+        body.schoolApplied || 'MONTE_TABOR', // default school
+        body.admissionPreference || 'NINGUNA' // admission preference
       ]);
 
       const studentId = studentResult.rows[0].id;
@@ -2288,7 +2302,7 @@ app.put('/api/applications/:id', authenticateToken, async (req, res) => {
       // Update student if provided
       if (student) {
         const studentUpdateQuery = `
-          UPDATE students SET 
+          UPDATE students SET
             first_name = COALESCE($1, first_name),
             paternal_last_name = COALESCE($2, paternal_last_name),
             maternal_last_name = COALESCE($3, maternal_last_name),
@@ -2299,8 +2313,9 @@ app.put('/api/applications/:id', authenticateToken, async (req, res) => {
             address = COALESCE($8, address),
             email = COALESCE($9, email),
             additional_notes = COALESCE($10, additional_notes),
+            admission_preference = COALESCE($11, admission_preference),
             updated_at = NOW()
-          WHERE id = $11
+          WHERE id = $12
         `;
 
         await client.query(studentUpdateQuery, [
@@ -2314,6 +2329,7 @@ app.put('/api/applications/:id', authenticateToken, async (req, res) => {
           student.address,
           student.email,
           student.notes || student.additionalNotes,
+          student.admissionPreference || 'NINGUNA',
           existingApp.student_id
         ]);
       }
@@ -2563,9 +2579,9 @@ app.post('/api/applications/:id/final-decision', authenticateToken, async (req, 
         templateType: templateType,
         data: emailData
       });
-      console.log(`📧 Email de ${decision === 'APPROVED' ? 'aceptación' : 'rechazo'} enviado a:`, application.guardian_email);
+      logger.info(`📧 Email de ${decision === 'APPROVED' ? 'aceptación' : 'rechazo'} enviado a:`, application.guardian_email);
     } catch (emailError) {
-      console.error('❌ Error enviando email:', emailError.message);
+      logger.error('❌ Error enviando email:', emailError.message);
       // No fallar la operación si el email falla
     }
 
@@ -2580,7 +2596,7 @@ app.post('/api/applications/:id/final-decision', authenticateToken, async (req, 
     });
 
   } catch (error) {
-    console.error('❌ Error en decisión final:', error);
+    logger.error('❌ Error en decisión final:', error);
     res.status(500).json({
       success: false,
       message: 'Error al procesar la decisión final'
@@ -2628,7 +2644,7 @@ app.put('/api/applications/:id/archive', authenticateToken, async (req, res) => 
     });
 
   } catch (error) {
-    console.error('❌ Error archivando postulación:', error);
+    logger.error('❌ Error archivando postulación:', error);
     res.status(500).json({
       success: false,
       error: 'Error interno del servidor al archivar la postulación',
@@ -2760,9 +2776,9 @@ app.patch('/api/applications/:id/status', authenticateToken, async (req, res) =>
             changeNote: changeNote || ''
           }
         });
-        console.log(`✅ Notificación de cambio de estado enviada a ${guardianEmail}`);
+        logger.info(`✅ Notificación de cambio de estado enviada a ${guardianEmail}`);
       } catch (notifError) {
-        console.error('⚠️ Error enviando notificación de cambio de estado:', notifError.message);
+        logger.error('⚠️ Error enviando notificación de cambio de estado:', notifError.message);
         // Don't fail the request if notification fails
       }
     }
@@ -2782,7 +2798,7 @@ app.patch('/api/applications/:id/status', authenticateToken, async (req, res) =>
 
   } catch (error) {
     await client.query('ROLLBACK');
-    console.error('❌ Error cambiando estado de postulación:', error);
+    logger.error('❌ Error cambiando estado de postulación:', error);
     res.status(500).json({
       success: false,
       error: 'Error interno del servidor al cambiar el estado',
@@ -2832,7 +2848,7 @@ app.get('/api/applications/:id/status-history', authenticateToken, async (req, r
     });
 
   } catch (error) {
-    console.error('❌ Error obteniendo historial de estados:', error);
+    logger.error('❌ Error obteniendo historial de estados:', error);
     res.status(500).json({
       success: false,
       error: 'Error interno del servidor al obtener el historial',
@@ -2853,10 +2869,10 @@ app.post('/api/applications/documents',
     const client = await dbPool.connect();
 
     try {
-      console.log('📎 Document upload request received');
-      console.log('👤 User:', req.user?.email);
-      console.log('📋 Body:', req.body);
-      console.log('📎 File:', req.file);
+      logger.info('📎 Document upload request received');
+      logger.info('👤 User:', req.user?.email);
+      logger.info('📋 Body:', req.body);
+      logger.info('📎 File:', req.file);
 
       // Validate file was uploaded
       if (!req.file) {
@@ -2932,10 +2948,10 @@ app.post('/api/applications/documents',
 
       const savedDocument = insertResult.rows[0];
 
-      console.log('✅ Document successfully uploaded and saved to database');
-      console.log('📄 Document ID:', savedDocument.id);
-      console.log('📁 File path:', savedDocument.file_path);
-      console.log('💾 File size:', savedDocument.file_size, 'bytes');
+      logger.info('✅ Document successfully uploaded and saved to database');
+      logger.info('📄 Document ID:', savedDocument.id);
+      logger.info('📁 File path:', savedDocument.file_path);
+      logger.info('💾 File size:', savedDocument.file_size, 'bytes');
 
       res.status(201).json({
         success: true,
@@ -2955,15 +2971,15 @@ app.post('/api/applications/documents',
       });
 
     } catch (error) {
-      console.error('❌ Error uploading document:', error);
+      logger.error('❌ Error uploading document:', error);
 
       // Clean up uploaded file if database operation failed
       if (req.file && fs.existsSync(req.file.path)) {
         try {
           fs.unlinkSync(req.file.path);
-          console.log('🗑️ Cleaned up uploaded file after error');
+          logger.info('🗑️ Cleaned up uploaded file after error');
         } catch (cleanupError) {
-          console.error('❌ Error cleaning up file:', cleanupError);
+          logger.error('❌ Error cleaning up file:', cleanupError);
         }
       }
 
@@ -3031,7 +3047,10 @@ app.get('/api/applications/:id/documents', authenticateToken, async (req, res) =
         content_type,
         is_required,
         created_at,
-        updated_at
+        updated_at,
+        approval_status,
+        reviewed_at,
+        reviewed_by
       FROM documents
       WHERE application_id = $1
       ORDER BY created_at DESC
@@ -3046,10 +3065,97 @@ app.get('/api/applications/:id/documents', authenticateToken, async (req, res) =
     });
 
   } catch (error) {
-    console.error('❌ Error fetching documents:', error);
+    logger.error('❌ Error fetching documents:', error);
     res.status(500).json({
       success: false,
       error: 'Error interno del servidor al obtener documentos',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// PUT /api/applications/documents/:documentId/approval - Update document approval status
+app.put('/api/applications/documents/:documentId/approval', authenticateToken, async (req, res) => {
+  const client = await dbPool.connect();
+
+  try {
+    const documentId = parseInt(req.params.documentId);
+    const { approvalStatus } = req.body; // APPROVED, REJECTED, PENDING
+
+    if (!documentId || isNaN(documentId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'ID de documento inválido'
+      });
+    }
+
+    // Validate approval status
+    const validStatuses = ['PENDING', 'APPROVED', 'REJECTED'];
+    if (!approvalStatus || !validStatuses.includes(approvalStatus)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Estado de aprobación inválido. Debe ser: PENDING, APPROVED, o REJECTED'
+      });
+    }
+
+    // Only admins and coordinators can approve documents
+    const isAdmin = req.user.role === 'ADMIN' ||
+                    req.user.role === 'COORDINATOR' ||
+                    req.user.role === 'CYCLE_DIRECTOR';
+
+    if (!isAdmin) {
+      return res.status(403).json({
+        success: false,
+        error: 'No tienes permisos para aprobar documentos'
+      });
+    }
+
+    // Update document approval status
+    const updateQuery = `
+      UPDATE documents
+      SET
+        approval_status = $1,
+        reviewed_at = NOW(),
+        reviewed_by = $2,
+        updated_at = NOW()
+      WHERE id = $3
+      RETURNING
+        id,
+        approval_status,
+        reviewed_at,
+        reviewed_by,
+        document_type,
+        file_name
+    `;
+
+    const result = await writeOperationBreaker.fire(
+      client,
+      updateQuery,
+      [approvalStatus, req.user.userId, documentId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Documento no encontrado'
+      });
+    }
+
+    logger.info(`✅ Documento ${documentId} actualizado a estado: ${approvalStatus} por usuario ${req.user.userId}`);
+
+    res.json({
+      success: true,
+      message: 'Estado de aprobación actualizado exitosamente',
+      document: result.rows[0]
+    });
+
+  } catch (error) {
+    logger.error('❌ Error updating document approval status:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error interno del servidor al actualizar estado de aprobación',
       details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   } finally {
@@ -3091,7 +3197,7 @@ app.delete('/api/applications/documents/:documentId', authenticateToken, async (
     // Delete physical file
     if (fs.existsSync(document.file_path)) {
       fs.unlinkSync(document.file_path);
-      console.log('🗑️ File deleted:', document.file_path);
+      logger.info('🗑️ File deleted:', document.file_path);
     }
 
     res.json({
@@ -3101,7 +3207,7 @@ app.delete('/api/applications/documents/:documentId', authenticateToken, async (
     });
 
   } catch (error) {
-    console.error('❌ Error deleting document:', error);
+    logger.error('❌ Error deleting document:', error);
     res.status(500).json({
       success: false,
       error: 'Error interno del servidor al eliminar documento',
@@ -3178,10 +3284,122 @@ app.get('/api/documents/:documentId/download', authenticateToken, async (req, re
     res.sendFile(document.file_path);
 
   } catch (error) {
-    console.error('❌ Error downloading document:', error);
+    logger.error('❌ Error downloading document:', error);
     res.status(500).json({
       success: false,
       error: 'Error al descargar el documento'
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// ============================================================================
+// DOCUMENT VIEW ENDPOINT (with query token support for iframes)
+// ============================================================================
+app.get('/api/applications/documents/view/:documentId', async (req, res) => {
+  const client = await dbPool.connect();
+
+  try {
+    const documentId = parseInt(req.params.documentId);
+
+    if (!documentId || isNaN(documentId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'ID de documento inválido'
+      });
+    }
+
+    // Get token from query params or Authorization header (for iframe support)
+    const token = req.query.token || req.headers.authorization?.replace('Bearer ', '');
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        error: 'Token de autenticación requerido'
+      });
+    }
+
+    // Decode token using same approach as authenticateToken middleware
+    // Mock services use base64-encoded JWT format without actual signature verification
+    let user;
+    try {
+      if (token && token.split('.').length === 3) {
+        // Decode the JWT payload (base64 decode the middle part)
+        const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
+        user = {
+          userId: payload.userId,
+          email: payload.email,
+          role: payload.role
+        };
+      } else {
+        // Fallback for invalid token format
+        throw new Error('Invalid token format');
+      }
+    } catch (err) {
+      logger.error('❌ Token decoding error:', err.message);
+      return res.status(401).json({
+        success: false,
+        error: 'Token inválido o expirado'
+      });
+    }
+
+    // Get document info
+    const documentQuery = 'SELECT * FROM documents WHERE id = $1';
+    const documentResult = await client.query(documentQuery, [documentId]);
+
+    if (documentResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Documento no encontrado'
+      });
+    }
+
+    const document = documentResult.rows[0];
+
+    // Authorization: User must own the application or be admin
+    const appQuery = 'SELECT applicant_user_id FROM applications WHERE id = $1';
+    const appResult = await client.query(appQuery, [document.application_id]);
+
+    if (appResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Aplicación no encontrada'
+      });
+    }
+
+    const isOwner = appResult.rows[0].applicant_user_id &&
+                    appResult.rows[0].applicant_user_id.toString() === user.userId;
+    const isAdmin = user.role === 'ADMIN' ||
+                    user.role === 'COORDINATOR' ||
+                    user.role === 'CYCLE_DIRECTOR';
+
+    if (!isOwner && !isAdmin) {
+      return res.status(403).json({
+        success: false,
+        error: 'No tienes permisos para ver este documento'
+      });
+    }
+
+    // Check if file exists
+    const fs = require('fs');
+    if (!fs.existsSync(document.file_path)) {
+      return res.status(404).json({
+        success: false,
+        error: 'Archivo no encontrado en el servidor'
+      });
+    }
+
+    // Send file for inline viewing
+    res.setHeader('Content-Type', document.content_type || 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${document.original_name}"`);
+    res.sendFile(document.file_path);
+
+  } catch (error) {
+    logger.error('❌ Error viewing document:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al visualizar el documento'
     });
   } finally {
     client.release();
@@ -3365,10 +3583,10 @@ app.get('/api/applications/:id/receipt', authenticateToken, async (req, res) => 
     // Finalize PDF
     doc.end();
 
-    console.log(`✅ PDF receipt generated for application ${applicationId} by user ${req.user.email}`);
+    logger.info(`✅ PDF receipt generated for application ${applicationId} by user ${req.user.email}`);
 
   } catch (error) {
-    console.error('❌ Error generating PDF receipt:', error);
+    logger.error('❌ Error generating PDF receipt:', error);
     const errorInfo = handleDatabaseError(error, req.correlationId);
 
     // If response hasn't been sent yet
@@ -3386,5 +3604,5 @@ app.get('/api/applications/:id/receipt', authenticateToken, async (req, res) => 
 });
 
 app.listen(port, () => {
-  console.log(`Application Service running on port ${port}`);
+  logger.info(`Application Service running on port ${port}`);
 });

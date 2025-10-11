@@ -30,14 +30,14 @@ application-*.yml
 !application-example.yml
 
 # Environment variables and secrets - NEVER COMMIT THESE
-.env*
-!.env.example
-*.env
+.env
+.env.*
 .env.local
 .env.development
 .env.staging
 .env.production
 .env.test
+!.env.example  # ÚNICA excepción permitida
 
 # Private keys and certificates - SECURITY CRITICAL
 *.pem
@@ -75,164 +75,73 @@ error.log
 debug.log
 trace.log
 
-# IDE - Spring Tool Suite
-.apt_generated
-.classpath
-.factorypath
-.project
-.settings/
-.springBeans
-.sts4-cache
-
-# IDE - IntelliJ IDEA
+# IDE - Spring Tool Suite / IntelliJ / Eclipse / VS Code / NetBeans
 .idea/
-*.iws
 *.iml
 *.ipr
-out/
-
-# IDE - NetBeans
-/nbproject/private/
-/nbbuild/
-/dist/
-/nbdist/
-/.nb-gradle/
-
-# IDE - VS Code
+*.iws
+.classpath
+.project
+.settings/
+.sts4-cache
+.factorypath
 .vscode/
-*.code-workspace
-
-# IDE - Eclipse
 .metadata
 bin/
 tmp/
-*.tmp
-*.bak
-*.swp
-*~.nib
-local.properties
-.settings/
-.loadpath
-.recommenders
-.project
-.externalToolBuilders/
-*.launch
-.pydevproject
-.cproject
-.autotools
-.factorypath
-.buildpath
-.target
-.tern-project
-.texlipse
-.springBeans
-.recommenders/
-
-# Operating System Files
+nbproject/private/
+nbbuild/
+dist/
+nbdist/
 .DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-desktop.ini
-
-# Temporary files
-tmp/
-temp/
-*.tmp
-*.temp
-.cache/
-*.pid
-*.seed
-*.pid.lock
-
-# Archive files
-*.zip
-*.tar.gz
-*.rar
-*.7z
 
 # Node.js (for mixed projects)
 node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-# package-lock.json - KEEP for CI/CD caching
-# yarn.lock - KEEP for CI/CD caching
 
-# JVM crash logs
-hs_err_pid*
-replay_pid*
-
-# Application specific
-uploads/
-upload/
-files/
-storage/
-
-# Testing
-.coverage/
-coverage/
-test-results/
-allure-results/
-*.lcov
-
-# Backup files
-*.backup
-*.bak
-*.backup.*
-backup/
-
-# Configuration files with secrets
-application-secrets.yml
-application-secrets.properties
-application-local.yml
-application-local.properties
-bootstrap-local.yml
-bootstrap-local.properties
+# OS / Temporary / Cache Files
+tmp/
+temp/
+.cache/
+*.pid
+*.seed
+*.pid.lock
+.Spotlight-V100
+.Trashes
+desktop.ini
+Thumbs.db
 
 # Docker
 .dockerignore
 docker-compose.override.yml
 Dockerfile.local
 
-# Terraform and infrastructure
-*.tfstate
-*.tfstate.*
-.terraform/
-terraform.tfvars
-*.auto.tfvars
+# Application-specific
+uploads/
+upload/
+files/
+storage/
 
-# Security scanning results
-.snyk
-security-report.*
-vulnerability-report.*
-dependency-check-report.*
+# Testing / Reports
+coverage/
+test-results/
+allure-results/
+*.lcov
 
-# Performance testing
-*.hprof
-*.jfr
-
-# Generated documentation
+# Backup / Generated / Build
+backup/
+*.backup
+*.bak
 docs/generated/
 javadoc/
 
-# Compiled class files
-*.class
-
-# Package Files
-*.jar
-*.war
-*.nar
-*.ear
-*.zip
-*.tar.gz
-*.rar
-
-# JPA Buddy
-.jpb/
+# Terraform / Infrastructure
+*.tfstate
+.terraform/
+terraform.tfvars
+*.auto.tfvars
 
 # Sensitive configuration patterns
 **/config/secrets/

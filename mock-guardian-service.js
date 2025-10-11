@@ -20,6 +20,8 @@ const CircuitBreaker = require('opossum');
 const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const { validateRUT } = require('./utils/validateRUT');
+const createLogger = require('./logger');
+const logger = createLogger('guardian-service');
 const app = express();
 const port = 8087; // Puerto diferente al user-service y notification-service
 
@@ -48,10 +50,10 @@ const dbPool = new Pool({
 });
 
 dbPool.on('error', (err) => {
-  console.error('⚠️ Unexpected database pool error:', err);
+  logger.error('⚠️ Unexpected database pool error:', err);
 });
 
-console.log('✅ Database connection pool initialized (max: 20 connections)');
+logger.info('✅ Database connection pool initialized (max: 20 connections)');
 
 // ============= DIFFERENTIATED CIRCUIT BREAKERS =============
 // 3 circuit breaker categories for Guardian Service
@@ -106,15 +108,15 @@ const writeOperationBreaker = new CircuitBreaker(
 // Event listeners for all breakers
 const setupBreakerEvents = (breaker, name) => {
   breaker.on('open', () => {
-    console.error(`⚠️ [Circuit Breaker ${name}] OPEN - Too many failures in guardian service`);
+    logger.error(`⚠️ [Circuit Breaker ${name}] OPEN - Too many failures in guardian service`);
   });
 
   breaker.on('halfOpen', () => {
-    console.warn(`🔄 [Circuit Breaker ${name}] HALF-OPEN - Testing recovery`);
+    logger.warn(`🔄 [Circuit Breaker ${name}] HALF-OPEN - Testing recovery`);
   });
 
   breaker.on('close', () => {
-    console.log(`✅ [Circuit Breaker ${name}] CLOSED - Guardian service recovered`);
+    logger.info(`✅ [Circuit Breaker ${name}] CLOSED - Guardian service recovered`);
   });
 
   breaker.fallback(() => {
@@ -479,7 +481,7 @@ app.post('/api/guardians/auth/register', async (req, res) => {
 
     const userId = userResult.rows[0].id;
 
-    console.log(`✅ Guardian registered successfully: ID=${newGuardian.id}, UserID=${userId}, Email=${email}`);
+    logger.info(`✅ Guardian registered successfully: ID=${newGuardian.id}, UserID=${userId}, Email=${email}`);
 
     // Agregar al array en memoria para compatibilidad con endpoints existentes
     guardians.push({
@@ -516,7 +518,7 @@ app.post('/api/guardians/auth/register', async (req, res) => {
       token: 'mock-jwt-token-for-new-guardian'
     });
   } catch (error) {
-    console.error('❌ Error registering guardian:', error);
+    logger.error('❌ Error registering guardian:', error);
     res.status(500).json({
       success: false,
       error: 'Error al registrar apoderado',
@@ -553,16 +555,16 @@ app.put('/api/guardians/:id', authenticateGuardian, (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`Guardian Service running on port ${port}`);
-  console.log(`Endpoints disponibles:`);
-  console.log(`  - GET    /health`);
-  console.log(`  - GET    /api/guardians`);
-  console.log(`  - GET    /api/guardians/:id`);
-  console.log(`  - GET    /api/guardians/by-application/:applicationId`);
-  console.log(`  - GET    /api/guardians/stats`);
-  console.log(`  - POST   /api/guardians/auth/login`);
-  console.log(`  - POST   /api/guardians/auth/register`);
-  console.log(`  - PUT    /api/guardians/:id`);
-  console.log(`\nNOTA: Este servicio maneja SOLO apoderados (usuarios externos).`);
-  console.log(`El personal del colegio está en el user-service (puerto 8082).`);
+  logger.info(`Guardian Service running on port ${port}`);
+  logger.info(`Endpoints disponibles:`);
+  logger.info(`  - GET    /health`);
+  logger.info(`  - GET    /api/guardians`);
+  logger.info(`  - GET    /api/guardians/:id`);
+  logger.info(`  - GET    /api/guardians/by-application/:applicationId`);
+  logger.info(`  - GET    /api/guardians/stats`);
+  logger.info(`  - POST   /api/guardians/auth/login`);
+  logger.info(`  - POST   /api/guardians/auth/register`);
+  logger.info(`  - PUT    /api/guardians/:id`);
+  logger.info(`\nNOTA: Este servicio maneja SOLO apoderados (usuarios externos).`);
+  logger.info(`El personal del colegio está en el user-service (puerto 8082).`);
 });

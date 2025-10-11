@@ -35,7 +35,7 @@ jobs:
     - name: 🟢 Set up Node.js
       uses: actions/setup-node@v4
       with:
-        node-version: '18'
+        node-version: '20'
         cache: 'npm'
         cache-dependency-path: backend/package-lock.json
 
@@ -48,6 +48,12 @@ jobs:
         echo "Installing Node.js dependencies..."
         npm ci
 
+    - name: 📦 Install NGINX
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y nginx
+        nginx -v
+
     - name: 🚀 Start Mock Services
       working-directory: backend
       run: |
@@ -58,18 +64,31 @@ jobs:
         node mock-notification-service.js > notif-service.log 2>&1 &
         node mock-dashboard-service.js > dash-service.log 2>&1 &
         node mock-guardian-service.js > guardian-service.log 2>&1 &
+        echo "Mock services started in background"
 
-        # Wait for services to start
-        echo "Waiting for services to be ready..."
-        sleep 10
-
-    - name: 🩺 Health Check
+    - name: 🌐 Start NGINX Gateway
+      working-directory: backend
       run: |
-        curl -f http://localhost:8082/health || echo "User service not ready"
-        curl -f http://localhost:8083/health || echo "Application service not ready"
-        curl -f http://localhost:8084/health || echo "Evaluation service not ready"
-        curl -f http://localhost:8085/health || echo "Notification service not ready"
-        curl -f http://localhost:8086/health || echo "Dashboard service not ready"
+        echo "Configuring NGINX gateway..."
+        # Update nginx config for Linux (use epoll instead of kqueue, fix mime.types path)
+        sed 's/use kqueue;/use epoll;/g; s|/opt/homebrew/etc/nginx/mime.types|/etc/nginx/mime.types|g' local-gateway.conf > local-gateway-linux.conf
+
+        # Start NGINX with our config
+        sudo nginx -c "$(pwd)/local-gateway-linux.conf"
+
+        echo "NGINX gateway started on port 8080"
+
+    - name: 🌱 Seed Test Data
+      working-directory: backend
+      run: |
+        chmod +x scripts/seed-test-data.sh
+        ./scripts/seed-test-data.sh
+
+    - name: 🩺 Health Check (All Services + Gateway)
+      working-directory: backend
+      run: |
+        chmod +x scripts/ci-health-check.sh
+        GATEWAY_URL=http://localhost:8080 ./scripts/ci-health-check.sh
 
     - name: 🧪 Run Backend Tests
       working-directory: backend
@@ -138,9 +157,9 @@ jobs:
     - name: 🟢 Set up Node.js
       uses: actions/setup-node@v4
       with:
-        node-version: '18'
+        node-version: '20'
 
-    - name: 🔧 Setup Environment
+    - name: 🔧 Setup Backend Environment
       working-directory: backend
       run: |
         # Setup database
@@ -149,6 +168,14 @@ jobs:
         # Install backend dependencies
         npm ci
 
+    - name: 📦 Install NGINX
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y nginx
+
+    - name: 🚀 Start Backend Infrastructure
+      working-directory: backend
+      run: |
         # Start mock services
         node mock-user-service.js > user-service.log 2>&1 &
         node mock-application-service.js > app-service.log 2>&1 &
@@ -157,7 +184,13 @@ jobs:
         node mock-dashboard-service.js > dash-service.log 2>&1 &
         node mock-guardian-service.js > guardian-service.log 2>&1 &
 
-        sleep 10
+        # Configure and start NGINX (fix kqueue and mime.types path)
+        sed 's/use kqueue;/use epoll;/g; s|/opt/homebrew/etc/nginx/mime.types|/etc/nginx/mime.types|g' local-gateway.conf > local-gateway-linux.conf
+        sudo nginx -c "$(pwd)/local-gateway-linux.conf"
+
+        # Seed test data
+        chmod +x scripts/seed-test-data.sh
+        ./scripts/seed-test-data.sh
 
     - name: 📦 Install Frontend Dependencies
       working-directory: frontend
@@ -181,18 +214,11 @@ jobs:
           timeout=$((timeout - 2))
         done
 
-    - name: ⏳ Wait for Services
+    - name: ⏳ Health Check (Gateway + Services)
+      working-directory: backend
       run: |
-        # Wait for backend services
-        timeout=60
-        while [ $timeout -gt 0 ]; do
-          if curl -s http://localhost:8082/health > /dev/null; then
-            echo "Backend services ready!"
-            break
-          fi
-          sleep 2
-          timeout=$((timeout - 2))
-        done
+        chmod +x scripts/ci-health-check.sh
+        GATEWAY_URL=http://localhost:8080 ./scripts/ci-health-check.sh
 
     - name: 🎭 Run Playwright E2E Tests
       working-directory: frontend
@@ -236,10 +262,15 @@ jobs:
     - name: 🟢 Set up Node.js
       uses: actions/setup-node@v4
       with:
-        node-version: '18'
+        node-version: '20'
 
     - name: 📮 Install Newman
       run: npm install -g newman
+
+    - name: 📦 Install NGINX
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y nginx
 
     - name: 🔧 Setup and Start Backend
       working-directory: backend
@@ -258,16 +289,17 @@ jobs:
         node mock-dashboard-service.js > dash-service.log 2>&1 &
         node mock-guardian-service.js > guardian-service.log 2>&1 &
 
-        # Wait for backend services
-        sleep 10
-        timeout=60
-        while [ $timeout -gt 0 ]; do
-          if curl -s http://localhost:8082/health > /dev/null; then
-            break
-          fi
-          sleep 2
-          timeout=$((timeout - 2))
-        done
+        # Configure and start NGINX (fix kqueue and mime.types path)
+        sed 's/use kqueue;/use epoll;/g; s|/opt/homebrew/etc/nginx/mime.types|/etc/nginx/mime.types|g' local-gateway.conf > local-gateway-linux.conf
+        sudo nginx -c "$(pwd)/local-gateway-linux.conf"
+
+        # Seed test data
+        chmod +x scripts/seed-test-data.sh
+        ./scripts/seed-test-data.sh
+
+        # Health check with retry logic
+        chmod +x scripts/ci-health-check.sh
+        GATEWAY_URL=http://localhost:8080 ./scripts/ci-health-check.sh
 
     - name: 📮 Run Postman Collection
       working-directory: backend
