@@ -1584,6 +1584,11 @@ app.post('/api/interviews', async (req, res) => {
       gradeApplied: interviewData.gradeApplied
     });
 
+    // ============= CACHE INVALIDATION =============
+    // Invalidate interview-related caches after successful creation
+    const cleared = evaluationCache.clear('interviews:');
+    logger.info(`[Cache Invalidation] Cleared ${cleared} interview cache entries after interview creation (ID: ${newInterview.id})`);
+
     // PASO 3: Retornar respuesta inmediatamente
     res.status(201).json({
       id: parseInt(interviewData.id),
@@ -2509,6 +2514,11 @@ app.put('/api/interviews/:id', async (req, res) => {
     const seconds = String(localDate.getSeconds()).padStart(2, '0');
     const localISOString = `${year}-${month}-${day}T${hours}:${minutes}:${seconds}`;
 
+    // ============= CACHE INVALIDATION =============
+    // Invalidate interview-related caches after successful update
+    const cleared = evaluationCache.clear('interviews:');
+    logger.info(`[Cache Invalidation] Cleared ${cleared} interview cache entries after interview update (ID: ${interviewId})`);
+
     res.json({
       success: true,
       data: {
@@ -2573,6 +2583,11 @@ app.delete('/api/interviews/:id', async (req, res) => {
     await client.query(deleteQuery, [interviewId]);
 
     logger.info('✅ Entrevista eliminada exitosamente:', interviewId);
+
+    // ============= CACHE INVALIDATION =============
+    // Invalidate interview-related caches after successful deletion
+    const cleared = evaluationCache.clear('interviews:');
+    logger.info(`[Cache Invalidation] Cleared ${cleared} interview cache entries after interview deletion (ID: ${interviewId})`);
 
     res.json({
       success: true,
@@ -4745,6 +4760,11 @@ app.put('/api/evaluations/:evaluationId', async (req, res) => {
       return res.status(404).json({ error: 'Evaluation not found' });
     }
 
+    // ============= CACHE INVALIDATION =============
+    // Invalidate evaluation-related caches after successful update
+    const cleared = evaluationCache.clear('evaluations:');
+    logger.info(`[Cache Invalidation] Cleared ${cleared} evaluation cache entries after evaluation update (ID: ${evaluationId})`);
+
     logger.info('✅ Evaluation updated successfully:', result.rows[0]);
     res.json(result.rows[0]);
 
@@ -5442,6 +5462,11 @@ app.post('/api/evaluations', async (req, res) => {
     const newEvaluation = result.rows[0];
 
     logger.info(`✅ Evaluation created: ${newEvaluation.id} for application ${application_id}`);
+
+    // ============= CACHE INVALIDATION =============
+    // Invalidate evaluation-related caches after successful creation
+    const cleared = evaluationCache.clear('evaluations:');
+    logger.info(`[Cache Invalidation] Cleared ${cleared} evaluation cache entries after evaluation creation (ID: ${newEvaluation.id})`);
 
     // HU-7: Send notification to evaluator
     await sendEvaluationAssignedNotification(newEvaluation.id, evaluator_id, application_id);

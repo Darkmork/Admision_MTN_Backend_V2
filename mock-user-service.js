@@ -1291,6 +1291,11 @@ app.put('/api/users/:id', csrfProtection, authenticateToken, async (req, res) =>
       users[userIndex] = updatedUser;
     }
 
+    // ============= CACHE INVALIDATION =============
+    // Invalidate all user-related caches after successful update
+    const cleared = userCache.clear('users:');
+    logger.info(`[Cache Invalidation] Cleared ${cleared} user cache entries after user update (ID: ${userId})`);
+
     res.json({
       success: true,
       message: 'User updated successfully',
@@ -1340,6 +1345,11 @@ app.delete('/api/users/:id', csrfProtection, authenticateToken, async (req, res)
       if (userIndex !== -1) {
         users.splice(userIndex, 1);
       }
+
+      // ============= CACHE INVALIDATION =============
+      // Invalidate all user-related caches after successful deletion
+      const cleared = userCache.clear('users:');
+      logger.info(`[Cache Invalidation] Cleared ${cleared} user cache entries after user deletion (ID: ${userId})`);
 
       res.json({
         success: true,
@@ -1431,6 +1441,11 @@ app.post('/api/users', csrfProtection, authenticateToken, async (req, res) => {
 
     // ONLY add to in-memory array if DB save succeeded
     users.push(newUser);
+
+    // ============= CACHE INVALIDATION =============
+    // Invalidate all user-related caches after successful creation
+    const cleared = userCache.clear('users:');
+    logger.info(`[Cache Invalidation] Cleared ${cleared} user cache entries after user creation (ID: ${newUser.id})`);
 
     // Create schedules for evaluator roles ONLY if user was successfully saved to database
     const evaluatorRoles = ['TEACHER_LANGUAGE', 'TEACHER_MATHEMATICS', 'TEACHER_ENGLISH', 'TEACHER', 'COORDINATOR', 'CYCLE_DIRECTOR', 'PSYCHOLOGIST', 'ADMIN'];
@@ -1896,6 +1911,11 @@ app.put('/api/users/:id/deactivate', authenticateToken, (req, res) => {
   users[userIndex].active = false;
   users[userIndex].updatedAt = new Date().toISOString();
 
+  // ============= CACHE INVALIDATION =============
+  // Invalidate all user-related caches after deactivation
+  const cleared = userCache.clear('users:');
+  logger.info(`[Cache Invalidation] Cleared ${cleared} user cache entries after user deactivation (ID: ${userId})`);
+
   res.json({
     success: true,
     message: 'Usuario desactivado exitosamente'
@@ -1916,6 +1936,11 @@ app.put('/api/users/:id/activate', authenticateToken, (req, res) => {
 
   users[userIndex].active = true;
   users[userIndex].updatedAt = new Date().toISOString();
+
+  // ============= CACHE INVALIDATION =============
+  // Invalidate all user-related caches after activation
+  const cleared = userCache.clear('users:');
+  logger.info(`[Cache Invalidation] Cleared ${cleared} user cache entries after user activation (ID: ${userId})`);
 
   res.json(users[userIndex]);
 });
