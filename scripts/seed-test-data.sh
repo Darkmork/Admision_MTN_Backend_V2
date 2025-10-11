@@ -179,7 +179,9 @@ if [ -n "$STUDENT_ID" ] && [ -n "$GUARDIAN_ID" ] && [ -n "$ADMIN_ID" ]; then
         2026,
         NOW(),
         NOW()
-    ) ON CONFLICT DO NOTHING;
+    ) ON CONFLICT (student_id) DO UPDATE SET
+        status = 'PENDING',
+        updated_at = NOW();
     " "Test application (PENDING status)"
 else
     echo "⚠️  Could not create application - missing prerequisites"
@@ -190,25 +192,30 @@ echo "6️⃣  Creating Interviewer Schedule..."
 TEACHER_ID=$(PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -c "SELECT id FROM users WHERE email = 'alejandra.flores@mtn.cl' LIMIT 1" | xargs)
 
 if [ -n "$TEACHER_ID" ]; then
-    execute_sql_check "
-    INSERT INTO interviewer_schedules (
-        user_id,
-        day_of_week,
-        start_time,
-        end_time,
-        max_interviews_per_day,
-        is_available,
-        created_at
-    ) VALUES (
-        $TEACHER_ID,
-        'MONDAY',
-        '09:00:00',
-        '17:00:00',
-        5,
-        true,
-        NOW()
-    ) ON CONFLICT DO NOTHING;
-    " "Interviewer schedule for teacher"
+    # Check if schedule already exists for this teacher on MONDAY
+    EXISTING_SCHEDULE=$(PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -c "SELECT COUNT(*) FROM interviewer_schedules WHERE interviewer_id = $TEACHER_ID AND day_of_week = 'MONDAY'" | xargs)
+
+    if [ "$EXISTING_SCHEDULE" -eq "0" ]; then
+        execute_sql_check "
+        INSERT INTO interviewer_schedules (
+            interviewer_id,
+            day_of_week,
+            start_time,
+            end_time,
+            is_active,
+            created_at
+        ) VALUES (
+            $TEACHER_ID,
+            'MONDAY',
+            '09:00:00',
+            '17:00:00',
+            true,
+            NOW()
+        );
+        " "Interviewer schedule for teacher"
+    else
+        echo "✅ Interviewer schedule for teacher (already exists)"
+    fi
 else
     echo "⚠️  Could not create interviewer schedule - teacher not found"
 fi
