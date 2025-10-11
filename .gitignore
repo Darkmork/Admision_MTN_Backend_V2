@@ -239,3 +239,8 @@ javadoc/
 **/config/local/
 **/resources/secrets/
 **/resources/local/
+
+# Environment variables
+.env
+.env.local
+.env.*.local

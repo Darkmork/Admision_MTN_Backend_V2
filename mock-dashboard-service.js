@@ -3,6 +3,8 @@ const compression = require('compression');
 const { Pool } = require('pg');
 const CircuitBreaker = require('opossum');
 const { translateToSpanish } = require('./translations');
+const createLogger = require('./logger');
+const logger = createLogger('dashboard-service');
 const app = express();
 const port = 8086;
 
@@ -103,15 +105,15 @@ const externalServiceBreaker = new CircuitBreaker(
 // Event listeners for all breakers
 const setupBreakerEvents = (breaker, name) => {
   breaker.on('open', () => {
-    console.error(`⚠️ [Circuit Breaker ${name}] OPEN - Too many failures in dashboard service`);
+    logger.error(`⚠️ [Circuit Breaker ${name}] OPEN - Too many failures in dashboard service`);
   });
 
   breaker.on('halfOpen', () => {
-    console.warn(`🔄 [Circuit Breaker ${name}] HALF-OPEN - Testing recovery`);
+    logger.warn(`🔄 [Circuit Breaker ${name}] HALF-OPEN - Testing recovery`);
   });
 
   breaker.on('close', () => {
-    console.log(`✅ [Circuit Breaker ${name}] CLOSED - Dashboard service recovered`);
+    logger.info(`✅ [Circuit Breaker ${name}] CLOSED - Dashboard service recovered`);
   });
 
   breaker.fallback(() => {
@@ -203,7 +205,7 @@ setInterval(() => {
     }
   }
   if (cleaned > 0) {
-    console.log(`[Cache] Cleaned ${cleaned} expired entries`);
+    logger.info(`[Cache] Cleaned ${cleaned} expired entries`);
   }
 }, 300000);
 
@@ -403,10 +405,10 @@ app.get('/api/dashboard/stats', async (req, res) => {
   const cacheKey = 'dashboard:stats:general';
   const cached = dashboardCache.get(cacheKey);
   if (cached) {
-    console.log('[Cache HIT] dashboard:stats:general');
+    logger.info('[Cache HIT] dashboard:stats:general');
     return res.json(cached);
   }
-  console.log('[Cache MISS] dashboard:stats:general');
+  logger.info('[Cache MISS] dashboard:stats:general');
 
   const client = await dbPool.connect();
   try {
@@ -475,7 +477,7 @@ app.get('/api/dashboard/stats', async (req, res) => {
   } catch (error) {
     // Check if circuit breaker is open
     if (error.message && error.message.includes('breaker')) {
-      console.error('⚠️ [Circuit Breaker OPEN] Dashboard stats unavailable');
+      logger.error('⚠️ [Circuit Breaker OPEN] Dashboard stats unavailable');
       return res.status(503).json({
         success: false,
         error: 'Service temporarily unavailable - circuit breaker open',
@@ -486,7 +488,7 @@ app.get('/api/dashboard/stats', async (req, res) => {
     }
 
     // Other database errors - fallback to mock data
-    console.error('⚠️ [Database Error] Falling back to mock data');
+    logger.error('⚠️ [Database Error] Falling back to mock data');
     res.json({
       success: true,
       data: dashboardData.statistics,
@@ -499,7 +501,7 @@ app.get('/api/dashboard/stats', async (req, res) => {
 });
 
 app.get('/api/dashboard/recent-activity', (req, res) => {
-  // Logging removed for security - console.log('🕐 Recent activity request received');
+  // Logging removed for security - logger.info('🕐 Recent activity request received');
   res.json({
     success: true,
     data: dashboardData.recentActivities,
@@ -508,7 +510,7 @@ app.get('/api/dashboard/recent-activity', (req, res) => {
 });
 
 app.get('/api/dashboard/upcoming-interviews', async (req, res) => {
-  // Logging removed for security - console.log('📅 Upcoming interviews request received');
+  // Logging removed for security - logger.info('📅 Upcoming interviews request received');
   const client = await dbPool.connect();
   try {
     // Get real upcoming interviews from database
@@ -561,7 +563,7 @@ app.get('/api/dashboard/upcoming-interviews', async (req, res) => {
 });
 
 app.get('/api/dashboard/pending-tasks', (req, res) => {
-  // Logging removed for security - console.log('✅ Pending tasks request received');
+  // Logging removed for security - logger.info('✅ Pending tasks request received');
   res.json({
     success: true,
     data: dashboardData.pendingTasks,
@@ -570,7 +572,7 @@ app.get('/api/dashboard/pending-tasks', (req, res) => {
 });
 
 app.get('/api/dashboard/alerts', (req, res) => {
-  // Logging removed for security - console.log('🚨 System alerts request received');
+  // Logging removed for security - logger.info('🚨 System alerts request received');
   res.json({
     success: true,
     data: dashboardData.systemAlerts,
@@ -579,7 +581,7 @@ app.get('/api/dashboard/alerts', (req, res) => {
 });
 
 app.get('/api/dashboard/metrics', (req, res) => {
-  // Logging removed for security - console.log('📊 Performance metrics request received');
+  // Logging removed for security - logger.info('📊 Performance metrics request received');
   res.json({
     success: true,
     data: dashboardData.performanceMetrics,
@@ -593,10 +595,10 @@ app.get('/api/dashboard/admin/stats', async (req, res) => {
   const cacheKey = 'dashboard:stats:admin';
   const cached = dashboardCache.get(cacheKey);
   if (cached) {
-    console.log('[Cache HIT] dashboard:stats:admin');
+    logger.info('[Cache HIT] dashboard:stats:admin');
     return res.json(cached);
   }
-  console.log('[Cache MISS] dashboard:stats:admin');
+  logger.info('[Cache MISS] dashboard:stats:admin');
 
   const client = await dbPool.connect();
   try {
@@ -665,7 +667,7 @@ app.get('/api/dashboard/admin/stats', async (req, res) => {
   } catch (error) {
     // Check if circuit breaker is open
     if (error.message && error.message.includes('breaker')) {
-      console.error('⚠️ [Circuit Breaker OPEN] Admin stats unavailable');
+      logger.error('⚠️ [Circuit Breaker OPEN] Admin stats unavailable');
       return res.status(503).json({
         success: false,
         error: 'Service temporarily unavailable - circuit breaker open',
@@ -676,7 +678,7 @@ app.get('/api/dashboard/admin/stats', async (req, res) => {
     }
 
     // Other database errors - fallback to mock data
-    console.error('⚠️ [Database Error] Falling back to mock data');
+    logger.error('⚠️ [Database Error] Falling back to mock data');
     res.json({
       success: true,
       data: dashboardData.statistics,
@@ -690,7 +692,7 @@ app.get('/api/dashboard/admin/stats', async (req, res) => {
 
 // Teacher-specific dashboard endpoints
 app.get('/api/dashboard/teacher/stats', async (req, res) => {
-  // Logging removed for security - console.log('👩‍🏫 Teacher dashboard stats request received');
+  // Logging removed for security - logger.info('👩‍🏫 Teacher dashboard stats request received');
   const client = await dbPool.connect();
   try {
     // Get teacher-specific statistics from database
@@ -753,10 +755,10 @@ app.get('/api/analytics/dashboard-metrics', async (req, res) => {
   const cacheKey = 'analytics:dashboard:metrics';
   const cached = dashboardCache.get(cacheKey);
   if (cached) {
-    console.log('[Cache HIT] analytics:dashboard:metrics');
+    logger.info('[Cache HIT] analytics:dashboard:metrics');
     return res.json(cached);
   }
-  console.log('[Cache MISS] analytics:dashboard:metrics');
+  logger.info('[Cache MISS] analytics:dashboard:metrics');
 
   const client = await dbPool.connect();
   try {
@@ -820,10 +822,10 @@ app.get('/api/analytics/status-distribution', async (req, res) => {
   const cacheKey = 'analytics:status:distribution';
   const cached = dashboardCache.get(cacheKey);
   if (cached) {
-    console.log('[Cache HIT] analytics:status:distribution');
+    logger.info('[Cache HIT] analytics:status:distribution');
     return res.json(cached);
   }
-  console.log('[Cache MISS] analytics:status:distribution');
+  logger.info('[Cache MISS] analytics:status:distribution');
 
   const client = await dbPool.connect();
   try {
@@ -996,10 +998,10 @@ app.get('/api/analytics/temporal-trends', async (req, res) => {
   const cacheKey = 'analytics:temporal:trends';
   const cached = dashboardCache.get(cacheKey);
   if (cached) {
-    console.log('[Cache HIT] analytics:temporal:trends');
+    logger.info('[Cache HIT] analytics:temporal:trends');
     return res.json(cached);
   }
-  console.log('[Cache MISS] analytics:temporal:trends');
+  logger.info('[Cache MISS] analytics:temporal:trends');
 
   const client = await dbPool.connect();
   try {
@@ -1243,10 +1245,10 @@ app.get('/api/dashboard/admin/detailed-stats', async (req, res) => {
   const cacheKey = `dashboard:detailed-stats:${yearFilter}`;
   const cached = dashboardCache.get(cacheKey);
   if (cached) {
-    console.log(`[Cache HIT] dashboard:detailed-stats:${yearFilter}`);
+    logger.info(`[Cache HIT] dashboard:detailed-stats:${yearFilter}`);
     return res.json(cached);
   }
-  console.log(`[Cache MISS] dashboard:detailed-stats:${yearFilter}`);
+  logger.info(`[Cache MISS] dashboard:detailed-stats:${yearFilter}`);
 
   const client = await dbPool.connect();
   try {
@@ -1360,7 +1362,7 @@ app.get('/api/dashboard/admin/detailed-stats', async (req, res) => {
     res.json(response);
 
   } catch (error) {
-    console.error('❌ Error fetching detailed dashboard stats:', error);
+    logger.error('❌ Error fetching detailed dashboard stats:', error);
 
     if (error.message && error.message.includes('breaker')) {
       return res.status(503).json({
@@ -1462,10 +1464,10 @@ app.use((err, req, res, next) => {
 
 // Start server
 app.listen(port, () => {
-  console.log('Dashboard Service running on port 8086');
-  console.log('✅ Circuit breaker enabled for database queries');
-  console.log('✅ In-memory cache enabled (5-15 min TTL)');
-  console.log('Cache endpoints:');
-  console.log('  - POST /api/dashboard/cache/clear (clear cache)');
-  console.log('  - GET  /api/dashboard/cache/stats (cache statistics)');
+  logger.info('Dashboard Service running on port 8086');
+  logger.info('✅ Circuit breaker enabled for database queries');
+  logger.info('✅ In-memory cache enabled (5-15 min TTL)');
+  logger.info('Cache endpoints:');
+  logger.info('  - POST /api/dashboard/cache/clear (clear cache)');
+  logger.info('  - GET  /api/dashboard/cache/stats (cache statistics)');
 });
