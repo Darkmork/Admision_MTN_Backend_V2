@@ -297,6 +297,27 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Initialize database schema
+        env:
+          PGPASSWORD: admin123
+        run: |
+          echo "🗄️  Initializing database schema..."
+          psql -h localhost -U admin -d "Admisión_MTN_DB" -f ci-schema-init.sql
+          echo "✅ Database schema initialized (35 tables created)"
+
+      - name: Verify schema was created
+        env:
+          PGPASSWORD: admin123
+        run: |
+          echo "📊 Verifying tables exist..."
+          TABLE_COUNT=$(psql -h localhost -U admin -d "Admisión_MTN_DB" -t -c "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public';")
+          echo "Found $TABLE_COUNT tables"
+          if [ "$TABLE_COUNT" -lt 30 ]; then
+            echo "❌ Expected at least 30 tables, found only $TABLE_COUNT"
+            exit 1
+          fi
+          echo "✅ Schema verification passed"
+
       - name: Install NGINX
         run: |
           sudo apt-get update
@@ -340,14 +361,6 @@ jobs:
         run: |
           curl -f http://localhost:8080/gateway/status || (echo "❌ Gateway health check failed" && exit 1)
           echo "✅ Gateway is responding"
-
-      - name: Initialize database schema
-        env:
-          PGPASSWORD: admin123
-        run: |
-          echo "🗄️  Initializing database schema..."
-          psql -h localhost -U admin -d "Admisión_MTN_DB" -f ci-schema-init.sql
-          echo "✅ Database schema initialized (35 tables created)"
 
       - name: Seed test data
         env:
