@@ -187,24 +187,41 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Check critical tables exist
+      - name: Initialize database schema
         env:
           PGPASSWORD: admin123
         run: |
-          psql -h localhost -U admin -d "Admisión_MTN_DB" -c "
-          SELECT table_name 
-          FROM information_schema.tables 
-          WHERE table_name IN ('applications', 'users', 'students', 'supporters', 'guardians')
-          " || echo "Tables not yet created (expected for new DB)"
+          echo "🗄️  Initializing database schema..."
+          psql -h localhost -U admin -d "Admisión_MTN_DB" -f ci-schema-init.sql
+          echo "✅ Database schema initialized successfully"
 
-      - name: Apply migrations (if any)
+      - name: Verify critical tables exist
         env:
           PGPASSWORD: admin123
         run: |
-          for sql in reports/*.sql; do
-            echo "Applying $sql..."
-            psql -h localhost -U admin -d "Admisión_MTN_DB" -f "$sql" || echo "Migration failed or already applied"
-          done
+          echo "Verifying tables..."
+          psql -h localhost -U admin -d "Admisión_MTN_DB" -c "
+          SELECT table_name
+          FROM information_schema.tables
+          WHERE table_schema = 'public'
+          ORDER BY table_name;
+          "
+          echo "✅ Schema verification complete"
+
+      - name: Apply additional migrations (if any)
+        env:
+          PGPASSWORD: admin123
+        run: |
+          if [ -d "reports" ]; then
+            for sql in reports/*.sql; do
+              if [ -f "$sql" ]; then
+                echo "Applying $sql..."
+                psql -h localhost -U admin -d "Admisión_MTN_DB" -f "$sql" || echo "Migration failed or already applied"
+              fi
+            done
+          else
+            echo "No reports directory found, skipping additional migrations"
+          fi
 
   # ============================================================================
   # JOB 4: Security Scanning
@@ -323,6 +340,14 @@ jobs:
         run: |
           curl -f http://localhost:8080/gateway/status || (echo "❌ Gateway health check failed" && exit 1)
           echo "✅ Gateway is responding"
+
+      - name: Initialize database schema
+        env:
+          PGPASSWORD: admin123
+        run: |
+          echo "🗄️  Initializing database schema..."
+          psql -h localhost -U admin -d "Admisión_MTN_DB" -f ci-schema-init.sql
+          echo "✅ Database schema initialized (35 tables created)"
 
       - name: Seed test data
         env:
