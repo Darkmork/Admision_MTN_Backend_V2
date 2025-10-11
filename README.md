@@ -411,6 +411,93 @@ Pre-defined event schemas for:
 
 ---
 
+## 🚂 Railway Deployment
+
+### Quick Deploy
+
+The MTN Admission System backend is configured for one-click deployment on Railway using npm and Node.js 20.
+
+**Prerequisites:**
+- Railway account (https://railway.app)
+- PostgreSQL database service added to Railway project
+
+### Deployment Steps
+
+1. **Connect Repository**
+   ```bash
+   # Railway auto-detects package-lock.json and uses npm
+   railway link
+   ```
+
+2. **Configure Environment Variables**
+
+   Required variables (link to Railway PostgreSQL service):
+   ```env
+   DB_HOST=${{Postgres.PGHOST}}
+   DB_PORT=${{Postgres.PGPORT}}
+   DB_NAME=${{Postgres.PGDATABASE}}
+   DB_USERNAME=${{Postgres.PGUSER}}
+   DB_PASSWORD=${{Postgres.PGPASSWORD}}
+   JWT_SECRET=<secure-random-secret>
+   NODE_ENV=production
+   ```
+
+3. **Initialize Database Schema**
+   ```bash
+   # Connect to Railway PostgreSQL
+   railway run psql < railway-db-setup.sql
+   ```
+
+4. **Verify Deployment**
+   ```bash
+   # Health check
+   curl https://your-app.railway.app/health
+
+   # Test login
+   curl -X POST https://your-app.railway.app/api/auth/login \
+     -H "Content-Type: application/json" \
+     -d '{"email":"jorge.gangale@mtn.cl","password":"admin123"}'
+   ```
+
+### Build Configuration
+
+Railway uses **Nixpacks** which automatically detects:
+- **Package Manager:** npm (via `package-lock.json`)
+- **Node Version:** 20.x (via `.nvmrc`)
+- **Build Command:** `npm ci && npm run build` (if build script exists)
+- **Start Command:** `npm start` (launches `start-railway.js`)
+
+### Service Architecture
+
+The start script (`start-railway.js`) launches all 6 Node.js microservices:
+- User Service (8082)
+- Application Service (8083)
+- Evaluation Service (8084)
+- Notification Service (8085)
+- Dashboard Service (8086)
+- Guardian Service (8087)
+
+**Note:** In production, Railway's `PORT` environment variable is automatically assigned. The NGINX gateway listens on this port and routes requests to backend services.
+
+### Detailed Documentation
+
+For complete Railway setup guide including:
+- Step-by-step configuration
+- Database initialization
+- Troubleshooting
+- Environment variables reference
+- Testing procedures
+
+See: **[RAILWAY_SETUP.md](./RAILWAY_SETUP.md)**
+
+### Package Manager Standardization
+
+This project uses **npm** as the standard package manager. For technical details about this decision:
+
+See: **[docs/pm-decision.md](./docs/pm-decision.md)**
+
+---
+
 ## 📄 License
 
 This project is proprietary software for Colegio Monte Tabor y Nazaret.
