@@ -85,10 +85,14 @@ jobs:
   # ============================================================================
   # JOB 2: Frontend Build & Tests
   # ============================================================================
+  # NOTE: Frontend is in separate repository (Darkmork/Admision_MTN_front)
+  # Failures here should not block backend CI
+  # ============================================================================
   frontend:
     name: Frontend (React + TypeScript)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    continue-on-error: true  # Don't block backend CI on frontend failures
 
     steps:
       - name: Checkout Backend Repository
@@ -161,10 +165,13 @@ jobs:
           retention-days: 7
 
   # ============================================================================
-  # JOB 3: Database Migrations Check
+  # JOB 3: Database Schema Verification
+  # ============================================================================
+  # NOTE: Schema creation now handled by scripts/seed-test-data.sh (idempotent)
+  # This job validates that the seed script works correctly
   # ============================================================================
   database:
-    name: Database Migrations
+    name: Database Schema Verification
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -187,41 +194,60 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Initialize database schema
+      - name: Run seed script to initialize schema
         env:
           PGPASSWORD: admin123
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_NAME: Admisión_MTN_DB
+          DB_USER: admin
         run: |
-          echo "🗄️  Initializing database schema..."
-          psql -h localhost -U admin -d "Admisión_MTN_DB" -f ci-schema-init.sql
-          echo "✅ Database schema initialized successfully"
+          echo "🗄️  Running idempotent seed script (creates schema + test data)..."
+          chmod +x scripts/seed-test-data.sh
+          ./scripts/seed-test-data.sh
+          echo "✅ Seed script executed successfully"
 
       - name: Verify critical tables exist
         env:
           PGPASSWORD: admin123
         run: |
-          echo "Verifying tables..."
-          psql -h localhost -U admin -d "Admisión_MTN_DB" -c "
-          SELECT table_name
-          FROM information_schema.tables
-          WHERE table_schema = 'public'
-          ORDER BY table_name;
-          "
-          echo "✅ Schema verification complete"
+          echo "📋 Verifying database schema..."
+          TABLES=$(psql -h localhost -U admin -d "Admisión_MTN_DB" -t -c "
+            SELECT COUNT(*)
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+            AND table_name IN ('users', 'guardians', 'students', 'applications', 'interviewer_schedules');
+          " | xargs)
 
-      - name: Apply additional migrations (if any)
+          if [ "$TABLES" -eq "5" ]; then
+            echo "✅ All 5 critical tables exist"
+          else
+            echo "❌ Expected 5 tables, found $TABLES"
+            echo "Existing tables:"
+            psql -h localhost -U admin -d "Admisión_MTN_DB" -c "
+              SELECT table_name
+              FROM information_schema.tables
+              WHERE table_schema = 'public'
+              ORDER BY table_name;
+            "
+            exit 1
+          fi
+
+      - name: Verify test data was seeded
         env:
           PGPASSWORD: admin123
         run: |
-          if [ -d "reports" ]; then
-            for sql in reports/*.sql; do
-              if [ -f "$sql" ]; then
-                echo "Applying $sql..."
-                psql -h localhost -U admin -d "Admisión_MTN_DB" -f "$sql" || echo "Migration failed or already applied"
-              fi
-            done
+          echo "📊 Verifying test data..."
+          ADMIN_COUNT=$(psql -h localhost -U admin -d "Admisión_MTN_DB" -t -c "SELECT COUNT(*) FROM users WHERE email = 'jorge.gangale@mtn.cl';" | xargs)
+
+          if [ "$ADMIN_COUNT" -eq "1" ]; then
+            echo "✅ Admin user exists"
           else
-            echo "No reports directory found, skipping additional migrations"
+            echo "❌ Admin user not found"
+            exit 1
           fi
+
+          echo "✅ Schema verification complete"
 
   # ============================================================================
   # JOB 4: Security Scanning
@@ -263,10 +289,13 @@ jobs:
   # ============================================================================
   # JOB 5: Smoke Tests
   # ============================================================================
+  # NOTE: Only depends on backend-nodejs (frontend is separate repo, non-blocking)
+  # ============================================================================
   smoke-tests:
     name: Smoke Tests
     runs-on: ubuntu-latest
-    needs: [backend-nodejs, frontend]
+    needs: [backend-nodejs]
+    if: always() && needs.backend-nodejs.result == 'success'
     timeout-minutes: 15
 
     services:
@@ -368,6 +397,9 @@ jobs:
   # ============================================================================
   # JOB 6: Build Summary
   # ============================================================================
+  # NOTE: Frontend and Database are optional (continue-on-error)
+  # Only backend-nodejs, security, and smoke-tests are critical
+  # ============================================================================
   summary:
     name: CI Summary
     runs-on: ubuntu-latest
@@ -383,21 +415,35 @@ jobs:
           echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
           echo "| Backend (Node.js) | ${{ needs.backend-nodejs.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Frontend | ${{ needs.frontend.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Database | ${{ needs.database.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Frontend (Optional) | ${{ needs.frontend.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Database Schema | ${{ needs.database.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Security | ${{ needs.security.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Smoke Tests | ${{ needs.smoke-tests.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Build Date:** $(date)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Note:** Frontend job is from separate repository and non-blocking" >> $GITHUB_STEP_SUMMARY
 
-      - name: Fail if critical jobs failed
+      - name: Fail if critical backend jobs failed
         if: needs.backend-nodejs.result == 'failure'
         run: |
           echo "❌ Critical backend job failed"
+          exit 1
+
+      - name: Fail if smoke tests failed
+        if: needs.smoke-tests.result == 'failure'
+        run: |
+          echo "❌ Smoke tests failed - system not functional"
           exit 1
 
       - name: Warn on frontend issues
         if: needs.frontend.result == 'failure'
         run: |
           echo "⚠️  Frontend build failed (non-blocking)"
-          echo "Frontend issues should be investigated but don't block the pipeline"
+          echo "Frontend is in separate repository - investigate independently"
+
+      - name: Warn on database issues
+        if: needs.database.result == 'failure'
+        run: |
+          echo "⚠️  Database schema verification failed (non-blocking)"
+          echo "Schema creation is also tested in smoke-tests job"
