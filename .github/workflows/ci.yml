@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 env:
-  NODE_VERSION: '18.x'
+  NODE_VERSION: '20.x'
   POSTGRES_VERSION: '15'
 
 jobs:
@@ -293,7 +293,7 @@ jobs:
 
           # Replace macOS-specific directives with Linux equivalents
           sed -i 's/use kqueue;/use epoll;/g' /tmp/ci-gateway.conf
-          sed -i 's|include.*/opt/homebrew/etc/nginx/mime.types;|include /etc/nginx/mime.types;|g' /tmp/ci-gateway.conf
+          sed -i 's|/opt/homebrew/etc/nginx/mime.types|/etc/nginx/mime.types|g' /tmp/ci-gateway.conf
 
           # Test configuration
           sudo nginx -t -c /tmp/ci-gateway.conf

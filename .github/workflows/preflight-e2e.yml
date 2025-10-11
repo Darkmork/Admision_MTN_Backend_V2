@@ -35,7 +35,7 @@ jobs:
     - name: 🟢 Set up Node.js
       uses: actions/setup-node@v4
       with:
-        node-version: '18'
+        node-version: '20'
         cache: 'npm'
         cache-dependency-path: backend/package-lock.json
 
@@ -70,8 +70,8 @@ jobs:
       working-directory: backend
       run: |
         echo "Configuring NGINX gateway..."
-        # Update nginx config for Linux (use epoll instead of kqueue)
-        sed 's/use kqueue;/use epoll;/' local-gateway.conf > local-gateway-linux.conf
+        # Update nginx config for Linux (use epoll instead of kqueue, fix mime.types path)
+        sed 's/use kqueue;/use epoll;/g; s|/opt/homebrew/etc/nginx/mime.types|/etc/nginx/mime.types|g' local-gateway.conf > local-gateway-linux.conf
 
         # Start NGINX with our config
         sudo nginx -c "$(pwd)/local-gateway-linux.conf"
@@ -157,7 +157,7 @@ jobs:
     - name: 🟢 Set up Node.js
       uses: actions/setup-node@v4
       with:
-        node-version: '18'
+        node-version: '20'
 
     - name: 🔧 Setup Backend Environment
       working-directory: backend
@@ -184,8 +184,8 @@ jobs:
         node mock-dashboard-service.js > dash-service.log 2>&1 &
         node mock-guardian-service.js > guardian-service.log 2>&1 &
 
-        # Configure and start NGINX
-        sed 's/use kqueue;/use epoll;/' local-gateway.conf > local-gateway-linux.conf
+        # Configure and start NGINX (fix kqueue and mime.types path)
+        sed 's/use kqueue;/use epoll;/g; s|/opt/homebrew/etc/nginx/mime.types|/etc/nginx/mime.types|g' local-gateway.conf > local-gateway-linux.conf
         sudo nginx -c "$(pwd)/local-gateway-linux.conf"
 
         # Seed test data
@@ -262,7 +262,7 @@ jobs:
     - name: 🟢 Set up Node.js
       uses: actions/setup-node@v4
       with:
-        node-version: '18'
+        node-version: '20'
 
     - name: 📮 Install Newman
       run: npm install -g newman
@@ -289,8 +289,8 @@ jobs:
         node mock-dashboard-service.js > dash-service.log 2>&1 &
         node mock-guardian-service.js > guardian-service.log 2>&1 &
 
-        # Configure and start NGINX
-        sed 's/use kqueue;/use epoll;/' local-gateway.conf > local-gateway-linux.conf
+        # Configure and start NGINX (fix kqueue and mime.types path)
+        sed 's/use kqueue;/use epoll;/g; s|/opt/homebrew/etc/nginx/mime.types|/etc/nginx/mime.types|g' local-gateway.conf > local-gateway-linux.conf
         sudo nginx -c "$(pwd)/local-gateway-linux.conf"
 
         # Seed test data
