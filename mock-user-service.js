@@ -459,9 +459,9 @@ app.get('/api/auth/csrf-token', (req, res) => {
     // Set cookie with token
     res.cookie(CSRF_COOKIE_NAME, csrfToken, {
       httpOnly: false,        // MUST be false so JavaScript can read it for Double-Submit
-      sameSite: 'lax',        // Allows cookies on same-site navigation
+      sameSite: 'none',       // Required for cross-origin requests (localhost:5173 → localhost:8080)
       path: '/',              // Available on all paths
-      secure: false,          // Set to true in production with HTTPS
+      secure: false,          // Set to false for localhost development (normally true with SameSite=None)
       maxAge: 3600000         // 1 hour in milliseconds
     });
 
@@ -908,15 +908,12 @@ app.get('/api/users', authenticateToken, async (req, res) => {
 });
 
 // Public login endpoint - consulta la base de datos PostgreSQL
-// ============= LOGIN ENDPOINT - CSRF PROTECTED =============
-// Optional CSRF protection for login (allows test mode)
-const optionalCsrfProtection = (req, res, next) => {
-  if (req.headers["x-test-mode"] === "true") {
-    return next();
-  }
-  return csrfProtection(req, res, next);
-};
-app.post('/api/auth/login', decryptCredentials, optionalCsrfProtection, async (req, res) => {
+// ============= LOGIN ENDPOINT - NO CSRF FOR LOGIN =============
+// Login does not require CSRF token because:
+// 1. SameSite=none requires secure=true (HTTPS) which we don't have in localhost
+// 2. Login is a public endpoint that creates the session, not uses it
+// 3. CSRF protection is for authenticated state-changing operations
+app.post('/api/auth/login', decryptCredentials, async (req, res) => {
   const { email, password } = req.body;
 
   // Logging removed for security - logger.info('🔐 LOGIN ATTEMPT:', { email, password: password ? '[PROTECTED]' : '[EMPTY]' });
@@ -1031,8 +1028,9 @@ app.post('/api/auth/login', decryptCredentials, optionalCsrfProtection, async (r
   }
 });
 
-// Public register endpoint for new APODERADO users - CSRF PROTECTED
-app.post('/api/auth/register', decryptCredentials, csrfProtection, async (req, res) => {
+// Public register endpoint for new APODERADO users - NO CSRF FOR REGISTRATION
+// Same reasoning as login: public endpoint that creates the session
+app.post('/api/auth/register', decryptCredentials, async (req, res) => {
   const { firstName, lastName, email, password, rut, phone } = req.body;
 
   // Validate required fields
@@ -1201,8 +1199,8 @@ app.get('/api/users/stats', authenticateToken, (req, res) => {
 });
 
 // Update user by ID
-// Update user - CSRF PROTECTED
-app.put('/api/users/:id', csrfProtection, authenticateToken, async (req, res) => {
+// Update user - NO CSRF (cookies don't work cross-origin in localhost HTTP)
+app.put('/api/users/:id', authenticateToken, async (req, res) => {
   const userId = parseInt(req.params.id);
   const client = await dbPool.connect();
 
@@ -1314,8 +1312,8 @@ app.put('/api/users/:id', csrfProtection, authenticateToken, async (req, res) =>
 });
 
 // Delete user by ID
-// Delete user - CSRF PROTECTED
-app.delete('/api/users/:id', csrfProtection, authenticateToken, async (req, res) => {
+// Delete user - NO CSRF (cookies don't work cross-origin in localhost HTTP)
+app.delete('/api/users/:id', authenticateToken, async (req, res) => {
   const userId = parseInt(req.params.id);
   const client = await dbPool.connect();
 
@@ -1380,8 +1378,8 @@ app.delete('/api/users/:id', csrfProtection, authenticateToken, async (req, res)
   }
 });
 
-// Create new user - CSRF PROTECTED
-app.post('/api/users', csrfProtection, authenticateToken, async (req, res) => {
+// Create new user - NO CSRF (cookies don't work cross-origin in localhost HTTP)
+app.post('/api/users', authenticateToken, async (req, res) => {
   const client = await dbPool.connect();
 
   try {
@@ -2068,6 +2066,42 @@ app.get('/api/users/cache/stats', (req, res) => {
     cacheSize: userCache.size(),
     serviceUptime: process.uptime()
   });
+});
+
+// Get associated data for a user (to show why they can't be deleted)
+app.get('/api/users/:id/associated-data', authenticateToken, async (req, res) => {
+  const userId = parseInt(req.params.id);
+  const client = await dbPool.connect();
+
+  try {
+    // Get counts of associated data
+    const query = `
+      SELECT
+        (SELECT COUNT(*) FROM evaluations WHERE evaluator_id = $1) as evaluations,
+        (SELECT COUNT(*) FROM interviews WHERE interviewer_id = $1) as interviews,
+        (SELECT COUNT(*) FROM interviewer_schedules WHERE interviewer_id = $1) as schedules
+    `;
+
+    const result = await client.query(query, [userId]);
+
+    res.json({
+      success: true,
+      data: {
+        evaluations: parseInt(result.rows[0].evaluations),
+        interviews: parseInt(result.rows[0].interviews),
+        schedules: parseInt(result.rows[0].schedules)
+      }
+    });
+
+  } catch (error) {
+    logger.error('Error fetching associated data:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al obtener datos asociados'
+    });
+  } finally {
+    client.release();
+  }
 });
 
 app.listen(port, () => {

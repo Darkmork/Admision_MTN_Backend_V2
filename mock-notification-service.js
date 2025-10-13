@@ -1,3 +1,6 @@
+// Load environment variables first
+require('dotenv').config();
+
 const express = require('express');
 const compression = require('compression');
 const nodemailer = require('nodemailer');
@@ -110,14 +113,15 @@ const ResponseHelper = {
 };
 
 // Configurar transportador de email con Gmail
+// Load credentials from environment variables for security
 const transporter = nodemailer.createTransport({
   service: 'gmail',
-  host: 'smtp.gmail.com',
-  port: 587,
+  host: process.env.SMTP_HOST || 'smtp.gmail.com',
+  port: parseInt(process.env.SMTP_PORT || '587'),
   secure: false,
   auth: {
-    user: 'admision@mtn.cl',
-    pass: 'elecdqywuqyuhafr' // App password sin espacios
+    user: process.env.SMTP_USERNAME || 'admision@mtn.cl',
+    pass: process.env.SMTP_PASSWORD // From .env file
   }
 });
 
@@ -755,6 +759,77 @@ function getEmailTemplate(templateType, data) {
         `
       };
 
+    case 'DOCUMENTS_APPROVED':
+      return {
+        subject: `✅ Documentos Aprobados - Postulación de ${data.studentName}`,
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #f9fafb;">
+            <!-- Header -->
+            <div style="background-color: #059669; color: white; padding: 30px 20px; text-align: center;">
+              <h1 style="margin: 0; font-size: 28px;">¡Excelente Noticia!</h1>
+              <p style="margin: 10px 0 0 0; font-size: 14px;">Colegio Monte Tabor y Nazaret</p>
+            </div>
+
+            <!-- Content -->
+            <div style="padding: 40px 20px; background-color: white;">
+              <h2 style="color: #059669; margin-top: 0;">Documentos Aprobados Exitosamente</h2>
+
+              <p>Estimado(a) ${data.guardianName || 'Apoderado(a)'},</p>
+
+              <p>Nos complace informarle que <strong>todos los documentos</strong> presentados para la postulación de <strong>${data.studentName}</strong> han sido <strong>revisados y aprobados</strong> exitosamente.</p>
+
+              <div style="background-color: #d1fae5; border-left: 4px solid #059669; padding: 20px; margin: 25px 0;">
+                <p style="margin: 0; font-size: 16px;"><strong>✅ Estado: Documentos Completos y Aprobados</strong></p>
+                <p style="margin: 15px 0 0 0;">Total de documentos aprobados: <strong>${data.totalDocuments || 'Todos'}</strong></p>
+                <p style="margin: 10px 0 0 0;">Año de Postulación: <strong>${data.applicationYear || currentYear + 1}</strong></p>
+              </div>
+
+              ${data.message ? `
+              <div style="background-color: #eff6ff; border-left: 4px solid #1e40af; padding: 15px; margin: 20px 0;">
+                <p style="margin: 0;"><strong>Mensaje del Equipo de Admisión:</strong></p>
+                <p style="margin: 10px 0 0 0;">${data.message}</p>
+              </div>
+              ` : ''}
+
+              <h3 style="color: #059669; margin-top: 30px;">🎯 Próximos Pasos</h3>
+              <p>Su postulación continúa en proceso de evaluación. Los siguientes pasos incluyen:</p>
+              <ol style="line-height: 1.8;">
+                <li>Evaluación académica del estudiante</li>
+                <li>Programación de entrevista (si corresponde)</li>
+                <li>Revisión final del comité de admisión</li>
+                <li>Notificación del resultado final</li>
+              </ol>
+
+              <div style="background-color: #fef3c7; border-left: 4px solid #f59e0b; padding: 15px; margin: 25px 0;">
+                <p style="margin: 0;"><strong>⏰ Importante:</strong></p>
+                <p style="margin: 10px 0 0 0;">No necesita realizar ninguna acción adicional en este momento. Le mantendremos informado sobre cada etapa del proceso de admisión.</p>
+              </div>
+
+              <p>Agradecemos su puntualidad y el cumplimiento de los requisitos documentales. Este es un paso importante en el proceso de admisión.</p>
+
+              <div style="background-color: #eff6ff; border-left: 4px solid #1e40af; padding: 15px; margin: 25px 0;">
+                <p style="margin: 0;"><strong>📞 Contacto:</strong></p>
+                <ul style="line-height: 1.8; margin: 10px 0 0 0;">
+                  <li>📧 Email: admision@mtn.cl</li>
+                  <li>📞 Teléfono: +56 2 1234 5678</li>
+                  <li>🌐 Web: www.mtn.cl</li>
+                </ul>
+              </div>
+
+              <p style="color: #6b7280; font-size: 14px; margin-top: 30px;">
+                Este es un correo automático, por favor no responder directamente.
+              </p>
+            </div>
+
+            <!-- Footer -->
+            <div style="background-color: #059669; color: white; padding: 20px; text-align: center; font-size: 12px;">
+              <p style="margin: 0;">© ${currentYear} Colegio Monte Tabor y Nazaret</p>
+              <p style="margin: 10px 0 0 0;">Sistema de Admisión - Todos los derechos reservados</p>
+            </div>
+          </div>
+        `
+      };
+
     case 'all_interviews_scheduled':
       // Formato de tipo de entrevista legible
       const typeLabels = {
@@ -1111,6 +1186,38 @@ app.post('/api/email/verify-code', (req, res) => {
   });
 });
 
+// Document type to human-readable label mapping
+const DOCUMENT_TYPE_LABELS = {
+  'BIRTH_CERTIFICATE': 'Certificado de Nacimiento',
+  'GRADES_2023': 'Certificado de Estudios 2023',
+  'GRADES_2024': 'Certificado de Estudios 2024',
+  'GRADES_2025_SEMESTER_1': 'Certificado de Estudios Primer Semestre 2025',
+  'PERSONALITY_REPORT_2024': 'Informe de Personalidad 2024',
+  'PERSONALITY_REPORT_2025_SEMESTER_1': 'Informe de Personalidad Primer Semestre 2025',
+  'ACADEMIC_TRANSCRIPT': 'Certificado de Notas',
+  'ID_CARD': 'Cédula de Identidad',
+  'MEDICAL_CERTIFICATE': 'Certificado Médico',
+  'PREVIOUS_SCHOOL_REPORT': 'Informe Colegio Anterior',
+  'RECOMMENDATION_LETTER': 'Carta de Recomendación',
+  'VACCINATION_RECORD': 'Registro de Vacunas',
+  'PSYCHO_PEDAGOGICAL_REPORT': 'Informe Psicopedagógico',
+  'SPECIAL_NEEDS_ASSESSMENT': 'Evaluación de Necesidades Especiales',
+  'GUARDIANSHIP_DOCUMENT': 'Documento de Tutela Legal',
+  'OTHER': 'Otro Documento'
+};
+
+// Helper function to convert document type to human-readable label
+function getDocumentLabel(documentTypeOrFilename) {
+  // If it's a known document type constant, return its label
+  if (DOCUMENT_TYPE_LABELS[documentTypeOrFilename]) {
+    return DOCUMENT_TYPE_LABELS[documentTypeOrFilename];
+  }
+
+  // If it's a filename, try to extract the type from it or return as-is
+  // This is a fallback for when we receive filenames instead of types
+  return documentTypeOrFilename;
+}
+
 // Document Review Email endpoint
 app.post('/api/institutional-emails/document-review/:applicationId', async (req, res) => {
   const { applicationId } = req.params;
@@ -1208,7 +1315,7 @@ app.post('/api/institutional-emails/document-review/:applicationId', async (req,
 
               <div class="document-list">
                 <h3 style="margin-top: 0; color: #10b981;">📄 Documentos Aprobados (${approvedDocuments.length}):</h3>
-                ${approvedDocuments.map(doc => `<div class="document-item">✓ ${doc}</div>`).join('')}
+                ${approvedDocuments.map(doc => `<div class="document-item">✓ ${getDocumentLabel(doc)}</div>`).join('')}
               </div>
 
               <div class="next-steps">
@@ -1290,14 +1397,14 @@ app.post('/api/institutional-emails/document-review/:applicationId', async (req,
               ${approvedDocuments.length > 0 ? `
               <div class="approved-list">
                 <h3 style="margin-top: 0; color: #10b981;">✅ Documentos Aprobados (${approvedDocuments.length}):</h3>
-                ${approvedDocuments.map(doc => `<div class="document-item">✓ ${doc}</div>`).join('')}
+                ${approvedDocuments.map(doc => `<div class="document-item">✓ ${getDocumentLabel(doc)}</div>`).join('')}
               </div>
               ` : ''}
 
               <div class="rejected-list">
                 <h3 style="margin-top: 0; color: #ef4444;">❌ Documentos Faltantes / Rechazados (${rejectedDocuments.length}):</h3>
                 <p style="color: #991b1b; font-weight: 600;">Debe presentar los siguientes documentos para continuar en el proceso:</p>
-                ${rejectedDocuments.map(doc => `<div class="document-item" style="color: #991b1b; font-weight: 500;">✗ ${doc}</div>`).join('')}
+                ${rejectedDocuments.map(doc => `<div class="document-item" style="color: #991b1b; font-weight: 500;">✗ ${getDocumentLabel(doc)}</div>`).join('')}
               </div>
 
               <div class="action-required">
