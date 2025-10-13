@@ -2,266 +2,215 @@
 
 **Chosen:** npm
 
-**Date:** October 11, 2025
-**Node Version:** 20.x LTS
-**npm Version:** 10.x+
+**Date:** October 12, 2025
 
-## Rationale
+**Rationale:**
 
-### Primary Factors
+This repository uses npm as the exclusive package manager for the following reasons:
 
-1. **Single Lockfile Present**: `package-lock.json` exists and is the only lockfile in the repository
-   - No `pnpm-lock.yaml` or `yarn.lock` detected
-   - Lockfile is synchronized with `package.json` (all dependencies resolved)
+1. **Explicit Configuration**: The `package.json` contains an explicit `engines` field specifying npm:
+   ```json
+   "engines": {
+     "node": ">=20 <21",
+     "npm": ">=10"
+   }
+   ```
 
-2. **CI/CD Configuration**: GitHub Actions workflow already configured for npm
-   - Uses `npm ci` for deterministic installs (line 58, 327 in `.github/workflows/ci.yml`)
-   - Node.js setup includes `cache: 'npm'` for performance
-   - No pnpm or yarn references in CI configuration
+2. **Single Lockfile**: Only `package-lock.json` exists in the repository (no `pnpm-lock.yaml` or `yarn.lock`)
 
-3. **Railway Compatibility**: Nixpacks auto-detection works seamlessly with npm
-   - Detects `package-lock.json` automatically
-   - No custom buildpack configuration required
-   - Standard build command: `npm ci && npm run build`
+3. **CI/CD Consistency**: GitHub Actions workflow (`.github/workflows/ci.yml`) uses `npm ci` for deterministic installs:
+   - Line 46: `cache: 'npm'`
+   - Line 58: `run: npm ci`
+   - Line 327: `run: npm ci`
 
-4. **Project Configuration**: No explicit package manager preference
-   - No `packageManager` field in `package.json`
-   - No `.npmrc` with pnpm-specific settings
-   - No `pnpm-workspace.yaml` for workspace configuration
+4. **Node.js Version**: Node.js 20.x LTS is the standard version
+   - Verified in `.nvmrc`: `v20`
+   - CI environment variable: `NODE_VERSION: '20.x'`
+   - Current local version: `v20.19.2`
 
-5. **Dependency Ecosystem**: All dependencies compatible with npm
-   - Express 5.1.0, PostgreSQL pg driver, Opossum circuit breaker
-   - No pnpm-specific features required
-   - Standard npm semver ranges work correctly
-
-### Alternative Considered
-
-**pnpm**: Not chosen because:
-- No pnpm lockfile present
-- No workspace configuration detected
-- CI already standardized on npm
-- Railway deployment simpler with npm (no corepack setup needed)
-- No performance issues with current npm setup (274 packages install in ~3s)
+5. **npm Version**: npm 11.4.1 (bundled with Node.js 20)
 
 ## Configuration
 
-### Node.js Version
+### Lockfile
+- **File**: `package-lock.json` (lockfileVersion 3)
+- **Status**: Synchronized with package.json (as of commit 5672a8c)
+- **Total packages**: 293 packages + 1 devDependency
 
-**Specified in:**
-- `.nvmrc`: `v20`
-- `package.json` engines: `"node": ">=20 <21"`
+### Dependencies (17 total)
+| Package | Version | Purpose |
+|---------|---------|---------|
+| express | 5.1.0 | Web framework (upgraded from 4.x) |
+| pg | 8.16.3 | PostgreSQL client with connection pooling |
+| bcryptjs | 3.0.2 | Password hashing |
+| axios | 1.12.2 | HTTP client |
+| nodemailer | 7.0.9 | Email sending |
+| opossum | 9.0.0 | Circuit breaker pattern |
+| cors | 2.8.5 | CORS middleware |
+| jsonwebtoken | 9.0.2 | JWT authentication |
+| winston | 3.18.3 | Logging framework |
+| compression | 1.8.1 | HTTP compression |
+| cookie-parser | 1.4.7 | Cookie parsing |
+| csrf-csrf | 4.0.3 | CSRF protection |
+| dotenv | 17.2.3 | Environment variables |
+| http-proxy-middleware | 3.0.5 | HTTP proxy |
+| multer | 2.0.2 | File upload handling |
+| pdfkit | 0.17.2 | PDF generation |
+| eslint | 9.37.0 | Linting (devDependency) |
 
-**Rationale for Node 20:**
-- Current LTS version (Long Term Support until April 2026)
-- Active maintenance and security updates
-- Native ECMAScript modules support
-- Performance improvements over Node 18
-- Compatible with all project dependencies
+### CI/CD Pipeline
+- **Platform**: GitHub Actions
+- **Workflow**: `.github/workflows/ci.yml`
+- **Install command**: `npm ci` (frozen lockfile install)
+- **Build command**: None (Node.js services run directly)
+- **Test command**: `npm test` (runs `integration-tests.sh`)
 
-### npm Version
+### Validation Steps
+The lockfile synchronization was validated through:
 
-**Specified in:**
-- `package.json` engines: `"npm": ">=10"`
+1. Clean install test: `rm -rf node_modules && npm ci`
+   - Result: 293 packages installed in 757ms, 0 vulnerabilities
 
-**Current version:** 11.4.1 (detected locally)
+2. Module resolution test: `node -e "require('express')"`
+   - Result: Express 5.1.0 loaded successfully
 
-**Features utilized:**
-- `npm ci` for frozen lockfile installs
-- Improved dependency resolution algorithm
-- Better audit security features
-- Workspace support (if needed in future)
+3. Dependency tree verification: `npm list --depth=0`
+   - Result: All 17 dependencies correctly resolved
 
-### Lockfile Strategy
+## Recent Fix: Lockfile Desynchronization (Oct 12, 2025)
 
-**File:** `package-lock.json` (lockfileVersion 3)
+### Problem
+The CI pipeline was failing with error:
+```
+npm error `npm ci` can only install packages when your package.json and
+package-lock.json or npm-shrinkwrap.json are in sync. Please update your
+lock file with `npm install` before continuing.
+```
 
-**Approach:**
-- **Frozen lockfile in CI**: `npm ci` ensures exact dependency versions
-- **Exact versions in lockfile**: All 274 packages with resolved versions
-- **Synchronized state**: `package.json` and `package-lock.json` match perfectly
-- **No manual edits**: Lockfile generated/updated only via npm commands
+**Root Cause**:
+- `package.json` was updated with `express@^5.1.0` and `dotenv@^17.2.3`
+- `package-lock.json` still referenced `express@4.x` dependencies
+- Missing entries for 60+ packages in the lockfile
 
-**Verification:**
+### Solution
+1. Removed existing `node_modules` and `package-lock.json`
+2. Regenerated lockfile with `npm install`
+3. Validated synchronization with `npm ci` in clean environment
+4. Committed synchronized lockfile (commit 5672a8c)
+
+### Verification
 ```bash
-# Clean install test
+# Test npm ci works
+cd Admision_MTN_backend
 rm -rf node_modules
-npm ci  # ✅ Succeeds in <3 seconds
+npm ci
 
-# Module resolution test
-node -e "require('express'); require('pg'); require('opossum');"
-# ✅ All critical dependencies load successfully
+# Expected output:
+# added 293 packages, and audited 294 packages in 757ms
+# 0 vulnerabilities
 ```
-
-## CI/CD Integration
-
-### GitHub Actions
-
-**Workflow:** `.github/workflows/ci.yml`
-
-**Backend job (lines 18-83):**
-```yaml
-- name: Setup Node.js
-  uses: actions/setup-node@v4
-  with:
-    node-version: ${{ env.NODE_VERSION }}  # 20.x
-    cache: 'npm'
-
-- name: Install dependencies
-  run: npm ci
-
-- name: Run tests
-  run: npm test || echo "No tests configured yet"
-```
-
-**Key aspects:**
-- Clean, idempotent installs with `npm ci`
-- Dependency caching for faster builds
-- No confusing conditionals or package manager detection
-- Smoke tests validate all services start correctly
-
-**Smoke tests job (lines 294-395):**
-- Validates mock services start successfully
-- Uses `npm ci` for dependency installation (line 327)
-- Tests full NGINX + Node.js microservices stack
-- No package manager confusion
-
-### Frontend Job (Separate Repository)
-
-**Note:** Frontend job (lines 91-165) handles multiple package managers because it builds from a separate repository (`Darkmork/Admision_MTN_front`). This is appropriate and not a "confusing conditional" - it's package manager auto-detection for an external repo.
 
 ## Railway Deployment
 
-### Configuration
+**Railway/Nixpacks Configuration:**
+- Auto-detects `package-lock.json` and uses npm
+- Build command: `npm ci && npm run build` (if build script exists)
+- Start command: `npm start` (runs `start-railway.js`)
 
-**Auto-detection:** Nixpacks detects `package-lock.json` automatically
+**Environment Variables Required:**
+- DB_HOST, DB_PORT, DB_NAME, DB_USERNAME, DB_PASSWORD
+- JWT_SECRET, JWT_EXPIRATION_TIME
+- SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD
+- EMAIL_MOCK_MODE (true/false)
 
-**Build command:**
+## Maintenance
+
+### Updating Dependencies
 ```bash
-npm ci && npm run build
+# Update a specific package
+npm update <package-name>
+
+# Update all packages (respecting semver)
+npm update
+
+# Check for outdated packages
+npm outdated
+
+# After updates, always validate
+rm -rf node_modules
+npm ci
 ```
 
-**Start command:**
+### Security Audits
 ```bash
-npm start
+# Check for vulnerabilities
+npm audit
+
+# Fix automatically (semver-compatible updates)
+npm audit fix
+
+# Force major version updates (use with caution)
+npm audit fix --force
 ```
 
-**Nixpacks plan:**
-- Detects Node.js 20.x from `.nvmrc`
-- Installs dependencies with `npm ci`
-- Runs build script if present
-- Executes `npm start` to launch services
-
-### Environment Variables
-
-Railway requires these environment variables:
+### Adding New Dependencies
 ```bash
-# Database
-DB_HOST=<railway-postgres-host>
-DB_PORT=5432
-DB_NAME=Admisión_MTN_DB
-DB_USERNAME=<railway-postgres-user>
-DB_PASSWORD=<railway-postgres-password>
+# Add production dependency
+npm install <package-name>
 
-# JWT
-JWT_SECRET=<secure-random-secret>
-JWT_EXPIRATION_TIME=86400000
+# Add development dependency
+npm install --save-dev <package-name>
 
-# Email
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USERNAME=<email-address>
-SMTP_PASSWORD=<app-specific-password>
-EMAIL_MOCK_MODE=false
-
-# Services
-PORT=8080
-NODE_ENV=production
+# Always commit both files
+git add package.json package-lock.json
+git commit -m "chore(deps): add <package-name>"
 ```
 
-### Health Check
+## Troubleshooting
 
-Railway health check endpoint:
+### Lockfile Out of Sync
+If you see "npm ci can only install packages when your package.json and package-lock.json are in sync":
+
 ```bash
-GET /health
-# Returns: {"status": "ok", "service": "user-service", "timestamp": "..."}
+# Regenerate lockfile
+rm -rf node_modules package-lock.json
+npm install
+
+# Validate it works
+rm -rf node_modules
+npm ci
+
+# Commit changes
+git add package.json package-lock.json
+git commit -m "chore(deps): synchronize lockfile"
 ```
 
-**Multiple services:** If deploying individual services, use respective health endpoints:
-- User Service: `http://localhost:8082/health`
-- Application Service: `http://localhost:8083/health`
-- Evaluation Service: `http://localhost:8084/health`
-- Notification Service: `http://localhost:8085/health`
-- Dashboard Service: `http://localhost:8086/health`
-- Guardian Service: `http://localhost:8087/health`
+### CI Failures
+If CI fails with npm ci errors:
 
-### Deployment Notes
+1. Check that both `package.json` and `package-lock.json` are committed
+2. Verify lockfile is not corrupted: `npm ci` should work locally
+3. Ensure Node.js version matches CI environment (20.x)
+4. Check GitHub Actions cache: May need to clear cache and re-run
 
-1. **Start Script**: Railway executes `start` script from `package.json`
-   - Current: `"start": "node start-railway.js"`
-   - This starts all 6 mock services
+### Module Not Found
+If services fail to start with "Cannot find module 'X'":
 
-2. **Build Phase**: No build script required for Node.js services
-   - Services are plain JavaScript (no TypeScript compilation)
-   - Dependencies installed via `npm ci`
+```bash
+# Verify module is in package.json
+cat package.json | grep <module-name>
 
-3. **Port Configuration**: Railway assigns `PORT` environment variable
-   - Services listen on ports 8082-8087
-   - NGINX gateway (if used) listens on `PORT` (default 8080)
+# Reinstall dependencies
+rm -rf node_modules
+npm ci
 
-4. **Database Migration**: Run seed script manually before first deploy
-   ```bash
-   # In Railway shell or local connection
-   chmod +x scripts/seed-test-data.sh
-   PGPASSWORD=<password> ./scripts/seed-test-data.sh
-   ```
+# Test module loading
+node -e "require('<module-name>'); console.log('OK')"
+```
 
-## Monorepo Support
+## References
 
-**Current status:** Not a monorepo
-
-**If monorepo in future:**
-- npm workspaces configuration would go in `package.json`
-- Root lockfile would cover all workspace packages
-- CI would use `npm ci --workspaces` for parallel installs
-
-## Edge Cases Handled
-
-1. **No pnpm lockfile**: Confirmed not present, no removal needed
-2. **Private registries**: No `.npmrc` with custom registries detected
-3. **Missing scripts**: CI uses `|| echo "No X configured"` fallback pattern
-4. **Security vulnerabilities**: CI runs `npm audit` with moderate threshold
-5. **Git conflicts**: Feature branch created from clean state
-
-## Quality Assurance Checklist
-
-- [x] Only one lockfile exists (`package-lock.json`)
-- [x] Lockfile is committed to version control
-- [x] `npm ci` succeeds in clean directory (verified)
-- [x] All critical dependencies load successfully (express, pg, opossum)
-- [x] Build script runs (no build script, services are plain JS)
-- [x] Test script has fallback (uses `|| echo` pattern)
-- [x] CI workflow syntax is valid (existing workflow unchanged)
-- [x] `package.json` engines field set correctly
-- [x] `.nvmrc` matches Node version (v20)
-- [x] No secrets exposed in configuration files
-
-## Success Criteria Met
-
-1. **Single lockfile:** `package-lock.json` present and synchronized
-2. **CI frozen lockfile:** Uses `npm ci` consistently
-3. **Railway compatible:** Nixpacks auto-detection works
-4. **Local validation:** Clean install and module resolution tested
-5. **Documentation complete:** This decision document comprehensive
-
-## Future Considerations
-
-1. **Dependency updates:** Use `npm update` to update within semver ranges
-2. **Security patches:** Run `npm audit fix` regularly
-3. **Major version upgrades:** Test in feature branch before merging
-4. **Lockfile conflicts:** Resolve by regenerating with `npm install`
-5. **Performance monitoring:** Current install time ~3s is acceptable
-
----
-
-**Decision Rationale Summary:**
-npm chosen because it's the existing standard with `package-lock.json` present, CI already configured for npm, Railway compatibility is seamless, and no pnpm-specific features are required. The lockfile is synchronized and all validation tests pass.
+- [npm ci documentation](https://docs.npmjs.com/cli/v10/commands/npm-ci)
+- [package-lock.json format](https://docs.npmjs.com/cli/v10/configuring-npm/package-lock-json)
+- [Node.js 20.x LTS](https://nodejs.org/en/blog/release/v20.0.0)
+- Project CI workflow: `.github/workflows/ci.yml`
