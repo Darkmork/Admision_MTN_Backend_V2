@@ -24,8 +24,11 @@ const port = 8082;
 // Performance impact (M1 Max benchmark):
 // - 10 rounds: Hash=48.8ms, Compare=49.0ms
 // - 8 rounds:  Hash=12.2ms, Compare=12.4ms (4x faster)
-const BCRYPT_ROUNDS = process.env.NODE_ENV === 'production' ? 8 : 10;
-logger.info(`[BCrypt] Using ${BCRYPT_ROUNDS} rounds (NODE_ENV: ${process.env.NODE_ENV || 'development'})`);
+//
+// SOLUTION: Use 8 rounds everywhere for consistency and Railway compatibility
+// Railway doesn't set NODE_ENV=production by default, so we use 8 rounds always
+const BCRYPT_ROUNDS = 8;
+logger.info(`[BCrypt] Using ${BCRYPT_ROUNDS} rounds (optimized for Railway shared vCPU)`);
 
 // ============= CUSTOM CSRF PROTECTION - DOUBLE-SUBMIT COOKIE PATTERN =============
 // Simple, reliable implementation that won't crash on startup
