@@ -933,28 +933,40 @@ app.get('/api/users', authenticateToken, async (req, res) => {
 // 2. Login is a public endpoint that creates the session, not uses it
 // 3. CSRF protection is for authenticated state-changing operations
 app.post('/api/auth/login', decryptCredentials, async (req, res) => {
+  const loginStartTime = Date.now();
   const { email, password } = req.body;
+
+  // TEMPORARY: Detailed timing logs for Railway diagnosis
+  console.log('[LOGIN] Request received at', new Date().toISOString());
+  console.time('[LOGIN] Total Request Time');
 
   // Logging removed for security - logger.info('🔐 LOGIN ATTEMPT:', { email, password: password ? '[PROTECTED]' : '[EMPTY]' });
 
   if (!email || !password) {
     // Logging removed for security - logger.info('❌ Missing email or password');
+    console.timeEnd('[LOGIN] Total Request Time');
     return res.status(400).json({
       success: false,
       error: 'Email y contraseña son obligatorios'
     });
   }
-  
+
+  console.time('[LOGIN] DB Pool Connect');
   const client = await dbPool.connect();
+  console.timeEnd('[LOGIN] DB Pool Connect');
   try {
     // Consultar base de datos para el usuario
+    console.time('[LOGIN] SELECT User Query');
     const userQuery = await client.query(
       'SELECT id, first_name, last_name, email, role, subject, password, active, email_verified FROM users WHERE email = $1',
       [email.toLowerCase().trim()]
     );
+    console.timeEnd('[LOGIN] SELECT User Query');
 
     if (userQuery.rows.length === 0) {
       // Logging removed for security - logger.info('❌ User not found:', email);
+      console.timeEnd('[LOGIN] Total Request Time');
+      console.log('[LOGIN] Failed: User not found');
       return res.status(401).json({
         success: false,
         error: 'Credenciales inválidas'
@@ -962,11 +974,14 @@ app.post('/api/auth/login', decryptCredentials, async (req, res) => {
     }
 
     const user = userQuery.rows[0];
+    console.log('[LOGIN] User found, ID:', user.id, 'Role:', user.role);
     // Logging removed for security - logger.info('👤 User found:', { id: user.id, email: user.email, role: user.role, active: user.active });
 
     // Verificar si el usuario está activo
     if (!user.active) {
       // Logging removed for security - logger.info('❌ User is inactive:', email);
+      console.timeEnd('[LOGIN] Total Request Time');
+      console.log('[LOGIN] Failed: User inactive');
       return res.status(401).json({
         success: false,
         error: 'Usuario inactivo'
@@ -974,11 +989,16 @@ app.post('/api/auth/login', decryptCredentials, async (req, res) => {
     }
 
     // Verificar contraseña usando bcrypt
+    console.time('[LOGIN] BCrypt Compare');
     const isValidPassword = await bcrypt.compare(password, user.password);
+    console.timeEnd('[LOGIN] BCrypt Compare');
+    console.log('[LOGIN] BCrypt result:', isValidPassword ? 'VALID' : 'INVALID');
     // Logging removed for security - logger.info('🔒 Password verification:', isValidPassword ? 'SUCCESS' : 'FAILED');
 
     if (!isValidPassword) {
       // Logging removed for security - logger.info('❌ Invalid password for user:', email);
+      console.timeEnd('[LOGIN] Total Request Time');
+      console.log('[LOGIN] Failed: Invalid password');
       return res.status(401).json({
         success: false,
         error: 'Credenciales inválidas'
@@ -986,24 +1006,29 @@ app.post('/api/auth/login', decryptCredentials, async (req, res) => {
     }
 
     // Actualizar last_login
+    console.time('[LOGIN] UPDATE last_login');
     await client.query(
       'UPDATE users SET last_login = NOW() WHERE id = $1',
       [user.id]
     );
+    console.timeEnd('[LOGIN] UPDATE last_login');
 
     // Para usuarios APODERADO, buscar su applicationId
     let applicationId = null;
     if (user.role === 'APODERADO') {
+      console.time('[LOGIN] SELECT Application ID');
       const applicationQuery = await client.query(
         'SELECT id FROM applications WHERE applicant_user_id = $1 ORDER BY created_at DESC LIMIT 1',
         [user.id]
       );
+      console.timeEnd('[LOGIN] SELECT Application ID');
       if (applicationQuery.rows.length > 0) {
         applicationId = applicationQuery.rows[0].id;
       }
     }
 
     // Create a proper JWT token with user data
+    console.time('[LOGIN] Generate JWT Token');
     const header = Buffer.from(JSON.stringify({alg: "HS256", typ: "JWT"})).toString('base64');
     const payload = Buffer.from(JSON.stringify({
       userId: user.id.toString(),
@@ -1014,6 +1039,7 @@ app.post('/api/auth/login', decryptCredentials, async (req, res) => {
     })).toString('base64');
     const signature = "mock-signature"; // In real app would be HMAC
     const token = `${header}.${payload}.${signature}`;
+    console.timeEnd('[LOGIN] Generate JWT Token');
 
     // Logging removed for security - logger.info('✅ Login successful for user:', { id: user.id, email: user.email, role: user.role });
 
@@ -1034,10 +1060,14 @@ app.post('/api/auth/login', decryptCredentials, async (req, res) => {
       responseData.applicationId = applicationId;
     }
 
+    console.timeEnd('[LOGIN] Total Request Time');
+    console.log('[LOGIN] Success! Total duration:', Date.now() - loginStartTime, 'ms');
     res.json(responseData);
 
   } catch (error) {
     // Error logging removed for security('💥 Database error during login:', error);
+    console.timeEnd('[LOGIN] Total Request Time');
+    console.error('[LOGIN] ERROR:', error.message);
     res.status(500).json({
       success: false,
       error: 'Error interno del servidor'
