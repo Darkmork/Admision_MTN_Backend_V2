@@ -1292,7 +1292,7 @@ app.get('/api/dashboard/admin/detailed-stats', async (req, res) => {
         COUNT(CASE WHEN status = 'REJECTED' THEN 1 END) as rejected
       FROM applications
       WHERE created_at >= $1
-        AND (application_year = $2 OR application_year IS NULL)
+        AND EXTRACT(YEAR FROM created_at) = $2
       GROUP BY TO_CHAR(created_at, 'YYYY-MM')
       ORDER BY month ASC
     `, [twelveMonthsAgo.toISOString(), yearFilter]);
@@ -1303,17 +1303,50 @@ app.get('/api/dashboard/admin/detailed-stats', async (req, res) => {
         status,
         COUNT(*) as count
       FROM applications
-      WHERE application_year = $1 OR application_year IS NULL
+      WHERE EXTRACT(YEAR FROM created_at) = $1
       GROUP BY status
     `, [yearFilter]);
 
     // 5. Años académicos disponibles
     const academicYearsQuery = await simpleQueryBreaker.fire(client, `
-      SELECT DISTINCT application_year
+      SELECT DISTINCT EXTRACT(YEAR FROM created_at) as application_year
       FROM applications
-      WHERE application_year IS NOT NULL
+      WHERE created_at IS NOT NULL
       ORDER BY application_year DESC
     `, []);
+
+    // 6. Breakdown por grado (grade distribution)
+    const gradeBreakdownQuery = await mediumQueryBreaker.fire(client, `
+      SELECT
+        s.grade_applied as grade,
+        COUNT(*) as count,
+        COUNT(CASE WHEN a.status = 'APPROVED' THEN 1 END) as approved,
+        COUNT(CASE WHEN a.status = 'REJECTED' THEN 1 END) as rejected,
+        COUNT(CASE WHEN a.status = 'PENDING' THEN 1 END) as pending
+      FROM applications a
+      LEFT JOIN students s ON s.id = a.student_id
+      WHERE EXTRACT(YEAR FROM a.created_at) = $1
+        AND a.deleted_at IS NULL
+      GROUP BY s.grade_applied
+      ORDER BY count DESC
+    `, [yearFilter]);
+
+    // 7. Breakdown mensual con estados (últimos 12 meses)
+    const monthlyBreakdownQuery = await heavyQueryBreaker.fire(client, `
+      SELECT
+        DATE_TRUNC('month', a.submission_date) as month,
+        COUNT(*) as total,
+        COUNT(CASE WHEN a.status = 'APPROVED' THEN 1 END) as approved,
+        COUNT(CASE WHEN a.status = 'REJECTED' THEN 1 END) as rejected,
+        COUNT(CASE WHEN a.status = 'PENDING' THEN 1 END) as pending,
+        COUNT(CASE WHEN a.status = 'UNDER_REVIEW' THEN 1 END) as under_review
+      FROM applications a
+      WHERE a.submission_date >= NOW() - INTERVAL '12 months'
+        AND EXTRACT(YEAR FROM a.submission_date) = $1
+        AND a.deleted_at IS NULL
+      GROUP BY DATE_TRUNC('month', a.submission_date)
+      ORDER BY month DESC
+    `, [yearFilter]);
 
     // Construir respuesta
     const weeklyInterviews = weeklyInterviewsQuery.rows[0];
@@ -1338,6 +1371,25 @@ app.get('/api/dashboard/admin/detailed-stats', async (req, res) => {
 
     const academicYears = academicYearsQuery.rows.map(row => row.application_year);
 
+    // Grade breakdown with status counts
+    const gradeBreakdown = gradeBreakdownQuery.rows.map(row => ({
+      grade: row.grade || 'Sin especificar',
+      total: parseInt(row.count),
+      approved: parseInt(row.approved),
+      rejected: parseInt(row.rejected),
+      pending: parseInt(row.pending)
+    }));
+
+    // Monthly breakdown with status counts
+    const monthlyBreakdown = monthlyBreakdownQuery.rows.map(row => ({
+      month: row.month ? row.month.toISOString().substring(0, 7) : null,
+      total: parseInt(row.total),
+      approved: parseInt(row.approved),
+      rejected: parseInt(row.rejected),
+      pending: parseInt(row.pending),
+      underReview: parseInt(row.under_review)
+    }));
+
     // Build complete detailed stats object
     const detailedStats = {
       academicYear: yearFilter,
@@ -1350,7 +1402,9 @@ app.get('/api/dashboard/admin/detailed-stats', async (req, res) => {
       pendingEvaluationsByType: pendingEvaluations,
       monthlyApplicationTrends: monthlyTrends,
       statusBreakdown: statusBreakdown,
-      availableAcademicYears: academicYears
+      availableAcademicYears: academicYears,
+      gradeBreakdown: gradeBreakdown,
+      monthlyBreakdown: monthlyBreakdown
     };
 
     // Return flattened response (QA expects academicYear at root)

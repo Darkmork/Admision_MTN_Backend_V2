@@ -373,10 +373,50 @@ app.get('/health', (req, res) => {
 app.get('/api/evaluations', async (req, res) => {
   const client = await dbPool.connect();
   try {
-    logger.info('📊 Getting ALL evaluations from database (including Alejandra Flores)');
+    // PAGINATION + FILTERS
+    const { page = 0, limit = 50, applicationId, status, evaluatorId, evaluationType } = req.query;
+    const offset = parseInt(page) * parseInt(limit);
 
-    // Query all evaluations with evaluator and student information
-    const result = await mediumQueryBreaker.fire(client, `
+    logger.info(`📊 Getting evaluations with pagination (page=${page}, limit=${limit})`);
+
+    // Build WHERE conditions
+    let whereConditions = [];
+    let params = [];
+    let paramCount = 0;
+
+    if (applicationId) {
+      paramCount++;
+      whereConditions.push(`e.application_id = $${paramCount}`);
+      params.push(parseInt(applicationId));
+    }
+
+    if (status) {
+      paramCount++;
+      whereConditions.push(`e.status = $${paramCount}`);
+      params.push(status);
+    }
+
+    if (evaluatorId) {
+      paramCount++;
+      whereConditions.push(`e.evaluator_id = $${paramCount}`);
+      params.push(parseInt(evaluatorId));
+    }
+
+    if (evaluationType) {
+      paramCount++;
+      whereConditions.push(`e.evaluation_type = $${paramCount}`);
+      params.push(evaluationType);
+    }
+
+    const whereClause = whereConditions.length > 0 ? 'WHERE ' + whereConditions.join(' AND ') : '';
+
+    // Count total (for pagination metadata)
+    const countQuery = `SELECT COUNT(*) as total FROM evaluations e ${whereClause}`;
+    const countResult = await simpleQueryBreaker.fire(client, countQuery, params);
+    const total = parseInt(countResult.rows[0].total);
+
+    // Query evaluations with pagination
+    const dataQuery = `
       SELECT
         e.*,
         u.id as evaluator_user_id,
@@ -393,8 +433,13 @@ app.get('/api/evaluations', async (req, res) => {
       LEFT JOIN users u ON e.evaluator_id = u.id
       LEFT JOIN applications a ON e.application_id = a.id
       LEFT JOIN students s ON a.student_id = s.id
+      ${whereClause}
       ORDER BY e.created_at DESC
-    `, []);
+      LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}
+    `;
+    const dataParams = [...params, parseInt(limit), offset];
+
+    const result = await mediumQueryBreaker.fire(client, dataQuery, dataParams);
 
     const evaluations = result.rows.map(row => ({
       id: row.id,
@@ -437,12 +482,15 @@ app.get('/api/evaluations', async (req, res) => {
       applicationStatus: row.application_status
     }));
 
-    logger.info(`✅ Found ${evaluations.length} evaluations in database`);
+    logger.info(`✅ Found ${evaluations.length} evaluations (page ${page}, total ${total})`);
 
     res.json({
       success: true,
       data: evaluations,
-      count: evaluations.length
+      total,
+      page: parseInt(page),
+      limit: parseInt(limit),
+      totalPages: Math.ceil(total / parseInt(limit))
     });
   } catch (error) {
     logger.error('❌ Error fetching evaluations:', error);
@@ -5506,6 +5554,226 @@ app.get('/api/evaluations/cache/stats', (req, res) => {
     cacheSize: evaluationCache.size(),
     serviceUptime: process.uptime()
   });
+});
+
+// ============================================
+// INTERVIEWER SCHEDULES MANAGEMENT ENDPOINTS
+// ============================================
+
+// GET /api/interviews/schedules - List all interviewer schedules with filters
+app.get('/api/interviews/schedules', async (req, res) => {
+  const client = await dbPool.connect();
+  try {
+    const { interviewerId, startDate, endDate, isActive } = req.query;
+
+    logger.info('📅 Getting interviewer schedules with filters:', req.query);
+
+    let query = `
+      SELECT s.*, u.first_name, u.last_name, u.email, u.role
+      FROM interviewer_schedules s
+      LEFT JOIN users u ON s.interviewer_id = u.id
+      WHERE 1=1
+    `;
+
+    const params = [];
+    let paramCount = 0;
+
+    if (interviewerId) {
+      paramCount++;
+      query += ` AND s.interviewer_id = $${paramCount}`;
+      params.push(parseInt(interviewerId));
+    }
+
+    if (startDate) {
+      paramCount++;
+      query += ` AND s.available_date >= $${paramCount}`;
+      params.push(startDate);
+    }
+
+    if (endDate) {
+      paramCount++;
+      query += ` AND s.available_date <= $${paramCount}`;
+      params.push(endDate);
+    }
+
+    if (isActive !== undefined) {
+      paramCount++;
+      query += ` AND s.is_active = $${paramCount}`;
+      params.push(isActive === 'true');
+    }
+
+    query += ` ORDER BY s.available_date ASC, s.start_time ASC`;
+
+    const result = await mediumQueryBreaker.fire(client, query, params);
+
+    logger.info(`✅ Found ${result.rows.length} interviewer schedules`);
+
+    res.json({
+      success: true,
+      data: result.rows,
+      total: result.rows.length
+    });
+  } catch (error) {
+    logger.error('❌ Error fetching schedules:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al obtener horarios',
+      message: error.message
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// POST /api/interviews/schedules - Create new interviewer schedule
+app.post('/api/interviews/schedules', async (req, res) => {
+  const client = await dbPool.connect();
+  try {
+    const { interviewerId, availableDate, startTime, endTime, location, notes } = req.body;
+
+    logger.info('📅 Creating new interviewer schedule:', { interviewerId, availableDate, startTime, endTime });
+
+    // Validate required fields
+    if (!interviewerId || !availableDate || !startTime || !endTime) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: interviewerId, availableDate, startTime, endTime'
+      });
+    }
+
+    // Check for conflicts
+    const conflictCheck = await mediumQueryBreaker.fire(client, `
+      SELECT id FROM interviewer_schedules
+      WHERE interviewer_id = $1
+      AND available_date = $2
+      AND is_active = true
+      AND (
+        (start_time <= $3 AND end_time > $3) OR
+        (start_time < $4 AND end_time >= $4) OR
+        (start_time >= $3 AND end_time <= $4)
+      )
+    `, [interviewerId, availableDate, startTime, endTime]);
+
+    if (conflictCheck.rows.length > 0) {
+      logger.warn('⚠️ Schedule conflict detected');
+      return res.status(409).json({
+        success: false,
+        error: 'Schedule conflict',
+        message: 'El entrevistador ya tiene un horario asignado en ese rango'
+      });
+    }
+
+    const result = await writeQueryBreaker.fire(client, `
+      INSERT INTO interviewer_schedules
+      (interviewer_id, available_date, start_time, end_time, location, notes, is_active)
+      VALUES ($1, $2, $3, $4, $5, $6, true)
+      RETURNING *
+    `, [interviewerId, availableDate, startTime, endTime, location || null, notes || null]);
+
+    logger.info(`✅ Schedule created with ID ${result.rows[0].id}`);
+
+    res.status(201).json({
+      success: true,
+      data: result.rows[0]
+    });
+  } catch (error) {
+    logger.error('❌ Error creating schedule:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al crear horario',
+      message: error.message
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// PUT /api/interviews/schedules/:id - Update existing schedule
+app.put('/api/interviews/schedules/:id', async (req, res) => {
+  const client = await dbPool.connect();
+  try {
+    const { id } = req.params;
+    const { availableDate, startTime, endTime, location, notes, isActive } = req.body;
+
+    logger.info(`📅 Updating schedule ${id}`);
+
+    const result = await writeQueryBreaker.fire(client, `
+      UPDATE interviewer_schedules
+      SET available_date = COALESCE($1, available_date),
+          start_time = COALESCE($2, start_time),
+          end_time = COALESCE($3, end_time),
+          location = COALESCE($4, location),
+          notes = COALESCE($5, notes),
+          is_active = COALESCE($6, is_active)
+      WHERE id = $7
+      RETURNING *
+    `, [availableDate, startTime, endTime, location, notes, isActive, id]);
+
+    if (result.rows.length === 0) {
+      logger.warn(`⚠️ Schedule ${id} not found`);
+      return res.status(404).json({
+        success: false,
+        error: 'Schedule not found'
+      });
+    }
+
+    logger.info(`✅ Schedule ${id} updated successfully`);
+
+    res.json({
+      success: true,
+      data: result.rows[0]
+    });
+  } catch (error) {
+    logger.error('❌ Error updating schedule:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al actualizar horario',
+      message: error.message
+    });
+  } finally {
+    client.release();
+  }
+});
+
+// DELETE /api/interviews/schedules/:id - Soft delete schedule (mark as inactive)
+app.delete('/api/interviews/schedules/:id', async (req, res) => {
+  const client = await dbPool.connect();
+  try {
+    const { id } = req.params;
+
+    logger.info(`📅 Deleting schedule ${id} (soft delete)`);
+
+    const result = await writeQueryBreaker.fire(client, `
+      UPDATE interviewer_schedules
+      SET is_active = false
+      WHERE id = $1
+      RETURNING *
+    `, [id]);
+
+    if (result.rows.length === 0) {
+      logger.warn(`⚠️ Schedule ${id} not found`);
+      return res.status(404).json({
+        success: false,
+        error: 'Schedule not found'
+      });
+    }
+
+    logger.info(`✅ Schedule ${id} deleted successfully`);
+
+    res.json({
+      success: true,
+      message: 'Schedule deleted successfully'
+    });
+  } catch (error) {
+    logger.error('❌ Error deleting schedule:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al eliminar horario',
+      message: error.message
+    });
+  } finally {
+    client.release();
+  }
 });
 
 app.listen(port, () => {
