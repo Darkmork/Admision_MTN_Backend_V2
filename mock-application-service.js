@@ -688,23 +688,68 @@ app.get('/api/applications', async (req, res) => {
     const pageNum = parseInt(req.query.page) || 0;
     const limit = parseInt(req.query.limit) || 20;
     const offset = pageNum * limit;
-    const statusFilter = req.query.status; // Extract status filter
+    const { status, search, grade, academicYear, startDate, endDate } = req.query;
 
     // Build WHERE conditions
     const whereConditions = ['a.deleted_at IS NULL'];
     const queryParams = [];
     let paramIndex = 1;
 
-    if (statusFilter) {
+    // Status filter
+    if (status) {
       whereConditions.push(`a.status = $${paramIndex}`);
-      queryParams.push(statusFilter);
+      queryParams.push(status);
+      paramIndex++;
+    }
+
+    // Academic year filter
+    if (academicYear) {
+      whereConditions.push(`a.application_year = $${paramIndex}`);
+      queryParams.push(parseInt(academicYear));
+      paramIndex++;
+    }
+
+    // Grade filter
+    if (grade) {
+      whereConditions.push(`s.grade_applied = $${paramIndex}`);
+      queryParams.push(grade);
+      paramIndex++;
+    }
+
+    // Search filter (nombre o RUT del estudiante)
+    if (search) {
+      whereConditions.push(`(
+        s.first_name ILIKE $${paramIndex} OR
+        s.paternal_last_name ILIKE $${paramIndex} OR
+        s.maternal_last_name ILIKE $${paramIndex} OR
+        s.rut ILIKE $${paramIndex}
+      )`);
+      queryParams.push(`%${search}%`);
+      paramIndex++;
+    }
+
+    // Date range filters
+    if (startDate) {
+      whereConditions.push(`a.submission_date >= $${paramIndex}`);
+      queryParams.push(startDate);
+      paramIndex++;
+    }
+
+    if (endDate) {
+      whereConditions.push(`a.submission_date <= $${paramIndex}`);
+      queryParams.push(endDate);
       paramIndex++;
     }
 
     const whereClause = whereConditions.join(' AND ');
 
-    // Query to count total applications with filters
-    const countQuery = `SELECT COUNT(*) as total FROM applications a WHERE ${whereClause}`;
+    // Query to count total applications with filters (need students JOIN for search/grade filters)
+    const countQuery = `
+      SELECT COUNT(DISTINCT a.id) as total
+      FROM applications a
+      LEFT JOIN students s ON s.id = a.student_id
+      WHERE ${whereClause}
+    `;
     const countResult = await queryWithCircuitBreaker.fire(client, countQuery, queryParams);
     const total = parseInt(countResult.rows[0].total);
 
@@ -3171,6 +3216,86 @@ app.put('/api/applications/documents/:documentId/approval', authenticateToken, a
 
     logger.info(`✅ Documento ${documentId} actualizado a estado: ${approvalStatus} por usuario ${req.user.userId}`);
 
+    // Get application ID for this document
+    const appQuery = `
+      SELECT application_id
+      FROM documents
+      WHERE id = $1
+    `;
+    const appResult = await client.query(appQuery, [documentId]);
+    const applicationId = appResult.rows[0]?.application_id;
+
+    // If document was approved, check if all documents for this application are now approved
+    if (approvalStatus === 'APPROVED' && applicationId) {
+      // Check application status
+      const appStatusQuery = `
+        SELECT a.id, a.status, u.email, u.first_name, u.last_name,
+               s.first_name as student_first_name, s.paternal_last_name as student_paternal_last_name,
+               s.maternal_last_name as student_maternal_last_name
+        FROM applications a
+        JOIN users u ON a.applicant_user_id = u.id
+        LEFT JOIN students s ON a.student_id = s.id
+        WHERE a.id = $1
+      `;
+      const appStatusResult = await client.query(appStatusQuery, [applicationId]);
+
+      if (appStatusResult.rows.length > 0) {
+        const application = appStatusResult.rows[0];
+
+        // Only proceed if application is in DOCUMENTS_REQUESTED status
+        if (application.status === 'DOCUMENTS_REQUESTED') {
+          // Check if all documents are approved
+          const allDocsQuery = `
+            SELECT COUNT(*) as total_docs,
+                   COUNT(*) FILTER (WHERE approval_status = 'APPROVED') as approved_docs
+            FROM documents
+            WHERE application_id = $1
+              AND deleted_at IS NULL
+          `;
+          const allDocsResult = await client.query(allDocsQuery, [applicationId]);
+          const docStats = allDocsResult.rows[0];
+
+          // If all documents are approved, change status to UNDER_REVIEW and send notification
+          if (docStats.total_docs > 0 &&
+              parseInt(docStats.total_docs) === parseInt(docStats.approved_docs)) {
+
+            logger.info(`🎉 Todos los documentos de la aplicación ${applicationId} han sido aprobados. Cambiando estado a UNDER_REVIEW.`);
+
+            // Update application status
+            const updateAppStatusQuery = `
+              UPDATE applications
+              SET status = 'UNDER_REVIEW',
+                  updated_at = NOW()
+              WHERE id = $1
+            `;
+            await client.query(updateAppStatusQuery, [applicationId]);
+
+            // Send notification to guardian
+            const notificationPayload = {
+              type: 'DOCUMENTS_APPROVED',
+              recipient: application.email,
+              data: {
+                guardianName: application.first_name + ' ' + application.last_name,
+                studentName: `${application.student_first_name} ${application.student_paternal_last_name} ${application.student_maternal_last_name || ''}`.trim(),
+                applicationId: applicationId,
+                applicationYear: new Date().getFullYear() + 1,
+                totalDocuments: docStats.total_docs,
+                message: 'Todos sus documentos han sido aprobados exitosamente. Su postulación continúa en proceso de evaluación.'
+              }
+            };
+
+            try {
+              await sendNotification('DOCUMENTS_APPROVED', notificationPayload.data, req.correlationId);
+              logger.info(`📧 Notificación de documentos aprobados enviada a ${application.email}`);
+            } catch (notifError) {
+              logger.error(`⚠️ Error enviando notificación de documentos aprobados:`, notifError);
+              // Don't fail the request if notification fails
+            }
+          }
+        }
+      }
+    }
+
     res.json({
       success: true,
       message: 'Estado de aprobación actualizado exitosamente',
@@ -3624,6 +3749,328 @@ app.get('/api/applications/:id/receipt', authenticateToken, async (req, res) => 
         details: process.env.NODE_ENV === 'development' ? error.message : undefined
       });
     }
+  } finally {
+    client.release();
+  }
+});
+
+// ===========================
+// COMPLEMENTARY APPLICATION FORM ENDPOINTS
+// ===========================
+
+/**
+ * GET /api/applications/:id/complementary-form
+ * Get complementary form data for an application
+ */
+app.get('/api/applications/:id/complementary-form', async (req, res) => {
+  const correlationId = req.correlationId || generateCorrelationId();
+  const applicationId = parseInt(req.params.id);
+  const client = await dbPool.connect();
+
+  try {
+    logger.info(`📋 [${correlationId}] GET complementary form for application ${applicationId}`);
+
+    // Verify application exists
+    const appCheckQuery = `
+      SELECT a.id, a.guardian_id, a.applicant_user_id
+      FROM applications a
+      WHERE a.id = $1 AND a.deleted_at IS NULL
+    `;
+    const appCheckResult = await client.query(appCheckQuery, [applicationId]);
+
+    if (appCheckResult.rows.length === 0) {
+      logger.warn(`⚠️ [${correlationId}] Application ${applicationId} not found`);
+      return res.status(404).json({
+        success: false,
+        error: 'Postulación no encontrada',
+        correlationId
+      });
+    }
+
+    // Get complementary form data
+    const formQuery = `
+      SELECT
+        id,
+        application_id,
+        other_schools,
+        father_name,
+        father_education,
+        father_current_activity,
+        mother_name,
+        mother_education,
+        mother_current_activity,
+        application_reasons,
+        school_change_reason,
+        family_values,
+        faith_experiences,
+        community_service_experiences,
+        children_descriptions,
+        is_submitted,
+        submitted_at,
+        created_at,
+        updated_at
+      FROM complementary_application_forms
+      WHERE application_id = $1
+    `;
+    const formResult = await client.query(formQuery, [applicationId]);
+
+    if (formResult.rows.length === 0) {
+      // No form exists yet - this is valid for new forms
+      logger.info(`ℹ️ [${correlationId}] No complementary form found for application ${applicationId} (not yet created)`);
+      return res.status(404).json({
+        success: false,
+        error: 'Formulario complementario no encontrado',
+        correlationId
+      });
+    }
+
+    const formData = formResult.rows[0];
+
+    logger.info(`✅ [${correlationId}] Complementary form retrieved for application ${applicationId}`);
+
+    res.json({
+      success: true,
+      data: formData,
+      correlationId,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    logger.error(`❌ [${correlationId}] Error getting complementary form:`, error);
+    const errorInfo = handleDatabaseError(error, correlationId);
+
+    res.status(errorInfo.status).json({
+      success: false,
+      error: 'Error al obtener el formulario complementario',
+      correlationId,
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  } finally {
+    client.release();
+  }
+});
+
+/**
+ * POST /api/applications/:id/complementary-form
+ * Save/update complementary form data for an application
+ */
+app.post('/api/applications/:id/complementary-form', async (req, res) => {
+  const correlationId = req.correlationId || generateCorrelationId();
+  const applicationId = parseInt(req.params.id);
+  const client = await dbPool.connect();
+
+  try {
+    logger.info(`📝 [${correlationId}] POST complementary form for application ${applicationId}`);
+
+    // Extract form data from request body
+    const {
+      otherSchools,
+      fatherName,
+      fatherEducation,
+      fatherCurrentActivity,
+      motherName,
+      motherEducation,
+      motherCurrentActivity,
+      applicationReasons,
+      schoolChangeReason,
+      familyValues,
+      faithExperiences,
+      communityServiceExperiences,
+      childrenDescriptions,
+      isSubmitted  // New field to control draft vs final submission
+    } = req.body;
+
+    // Validate required fields
+    if (!applicationReasons || !familyValues) {
+      logger.warn(`⚠️ [${correlationId}] Missing required fields in complementary form`);
+      return res.status(400).json({
+        success: false,
+        error: 'Los campos de razones de postulación y valores familiares son obligatorios',
+        correlationId
+      });
+    }
+
+    // Verify application exists
+    const appCheckQuery = `
+      SELECT a.id, a.guardian_id, a.applicant_user_id, a.status
+      FROM applications a
+      WHERE a.id = $1 AND a.deleted_at IS NULL
+    `;
+    const appCheckResult = await client.query(appCheckQuery, [applicationId]);
+
+    if (appCheckResult.rows.length === 0) {
+      logger.warn(`⚠️ [${correlationId}] Application ${applicationId} not found`);
+      return res.status(404).json({
+        success: false,
+        error: 'Postulación no encontrada',
+        correlationId
+      });
+    }
+
+    // Check if complementary form already exists
+    const existingFormQuery = `
+      SELECT id, is_submitted, submitted_at FROM complementary_application_forms WHERE application_id = $1
+    `;
+    const existingFormResult = await client.query(existingFormQuery, [applicationId]);
+
+    // Prevent modification if form was already submitted
+    if (existingFormResult.rows.length > 0 && existingFormResult.rows[0].is_submitted) {
+      logger.warn(`⚠️ [${correlationId}] Attempt to modify submitted form for application ${applicationId}`);
+      return res.status(403).json({
+        success: false,
+        error: 'Este formulario ya fue enviado y no puede ser modificado',
+        submittedAt: existingFormResult.rows[0].submitted_at,
+        correlationId
+      });
+    }
+
+    let formId;
+    let isNew = false;
+
+    if (existingFormResult.rows.length === 0) {
+      // Insert new form
+      isNew = true;
+      const insertQuery = `
+        INSERT INTO complementary_application_forms (
+          application_id,
+          other_schools,
+          father_name,
+          father_education,
+          father_current_activity,
+          mother_name,
+          mother_education,
+          mother_current_activity,
+          application_reasons,
+          school_change_reason,
+          family_values,
+          faith_experiences,
+          community_service_experiences,
+          children_descriptions,
+          is_submitted,
+          submitted_at,
+          created_at,
+          updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        RETURNING id
+      `;
+
+      // If submitting, use CURRENT_TIMESTAMP for submitted_at, otherwise null
+      const submittedTimestamp = isSubmitted ? new Date() : null;
+
+      const insertResult = await client.query(insertQuery, [
+        applicationId,
+        otherSchools || null,
+        fatherName || null,
+        fatherEducation || null,
+        fatherCurrentActivity || null,
+        motherName || null,
+        motherEducation || null,
+        motherCurrentActivity || null,
+        applicationReasons,
+        schoolChangeReason || null,
+        familyValues,
+        faithExperiences || null,
+        communityServiceExperiences || null,
+        childrenDescriptions ? JSON.stringify(childrenDescriptions) : null,
+        isSubmitted || false,
+        submittedTimestamp
+      ]);
+
+      formId = insertResult.rows[0].id;
+      logger.info(`✅ [${correlationId}] New complementary form created with ID ${formId} for application ${applicationId}`);
+
+    } else {
+      // Update existing form
+      formId = existingFormResult.rows[0].id;
+      // If submitting, set is_submitted and submitted_at
+      const submittedTimestamp = isSubmitted ? new Date() : null;
+
+      const updateQuery = `
+        UPDATE complementary_application_forms SET
+          other_schools = $1,
+          father_name = $2,
+          father_education = $3,
+          father_current_activity = $4,
+          mother_name = $5,
+          mother_education = $6,
+          mother_current_activity = $7,
+          application_reasons = $8,
+          school_change_reason = $9,
+          family_values = $10,
+          faith_experiences = $11,
+          community_service_experiences = $12,
+          children_descriptions = $13,
+          is_submitted = COALESCE($14, is_submitted),
+          submitted_at = COALESCE($15, submitted_at),
+          updated_at = CURRENT_TIMESTAMP
+        WHERE application_id = $16
+      `;
+
+      await client.query(updateQuery, [
+        otherSchools || null,
+        fatherName || null,
+        fatherEducation || null,
+        fatherCurrentActivity || null,
+        motherName || null,
+        motherEducation || null,
+        motherCurrentActivity || null,
+        applicationReasons,
+        schoolChangeReason || null,
+        familyValues,
+        faithExperiences || null,
+        communityServiceExperiences || null,
+        childrenDescriptions ? JSON.stringify(childrenDescriptions) : null,
+        isSubmitted || null,
+        submittedTimestamp,
+        applicationId
+      ]);
+
+      logger.info(`✅ [${correlationId}] Complementary form ${formId} updated for application ${applicationId}`);
+    }
+
+    // Retrieve the saved/updated form
+    const savedFormQuery = `
+      SELECT
+        id,
+        application_id,
+        other_schools,
+        father_name,
+        father_education,
+        father_current_activity,
+        mother_name,
+        mother_education,
+        mother_current_activity,
+        application_reasons,
+        school_change_reason,
+        family_values,
+        faith_experiences,
+        community_service_experiences,
+        children_descriptions,
+        created_at,
+        updated_at
+      FROM complementary_application_forms
+      WHERE id = $1
+    `;
+    const savedFormResult = await client.query(savedFormQuery, [formId]);
+
+    res.status(isNew ? 201 : 200).json({
+      success: true,
+      message: isNew ? 'Formulario complementario creado exitosamente' : 'Formulario complementario actualizado exitosamente',
+      data: savedFormResult.rows[0],
+      correlationId,
+      timestamp: new Date().toISOString()
+    });
+
+  } catch (error) {
+    logger.error(`❌ [${correlationId}] Error saving complementary form:`, error);
+    const errorInfo = handleDatabaseError(error, correlationId);
+
+    res.status(errorInfo.status).json({
+      success: false,
+      error: 'Error al guardar el formulario complementario',
+      correlationId,
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   } finally {
     client.release();
   }
