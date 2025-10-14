@@ -1077,6 +1077,155 @@ app.post('/api/auth/login', decryptCredentials, async (req, res) => {
   }
 });
 
+// ============= RAILWAY WORKAROUND: ALIAS LOGIN ROUTE =============
+// Railway proxy appears to block/timeout POST /api/auth/login
+// This alias route `/api/security/signin` bypasses Railway's path signature detection
+// Feature flag: FEATURE_ALT_AUTH_PATH (defaults to true for Railway compatibility)
+const FEATURE_ALT_AUTH_PATH = process.env.FEATURE_ALT_AUTH_PATH !== 'false'; // Default enabled
+
+if (FEATURE_ALT_AUTH_PATH) {
+  logger.info('[RAILWAY WORKAROUND] Enabling alias auth route: POST /api/security/signin');
+
+  // Alias route that bypasses Railway proxy blocking
+  app.post('/api/security/signin', decryptCredentials, async (req, res) => {
+    logger.info('[ALIAS AUTH] Request received via /api/security/signin (Railway workaround)');
+
+    // Reuse the same login logic from /api/auth/login
+    const loginStartTime = Date.now();
+    const { email, password } = req.body;
+
+    console.log('[ALIAS AUTH] Processing login at', new Date().toISOString());
+    console.time('[ALIAS AUTH] Total Request Time');
+
+    if (!email || !password) {
+      console.timeEnd('[ALIAS AUTH] Total Request Time');
+      return res.status(400).json({
+        success: false,
+        error: 'Email y contraseña son obligatorios'
+      });
+    }
+
+    console.time('[ALIAS AUTH] DB Pool Connect');
+    const client = await dbPool.connect();
+    console.timeEnd('[ALIAS AUTH] DB Pool Connect');
+
+    try {
+      // Query database for user
+      console.time('[ALIAS AUTH] SELECT User Query');
+      const userQuery = await client.query(
+        'SELECT id, first_name, last_name, email, role, subject, password, active, email_verified FROM users WHERE email = $1',
+        [email.toLowerCase().trim()]
+      );
+      console.timeEnd('[ALIAS AUTH] SELECT User Query');
+
+      if (userQuery.rows.length === 0) {
+        console.timeEnd('[ALIAS AUTH] Total Request Time');
+        console.log('[ALIAS AUTH] Failed: User not found');
+        return res.status(401).json({
+          success: false,
+          error: 'Credenciales inválidas'
+        });
+      }
+
+      const user = userQuery.rows[0];
+      console.log('[ALIAS AUTH] User found, ID:', user.id, 'Role:', user.role);
+
+      // Check if user is active
+      if (!user.active) {
+        console.timeEnd('[ALIAS AUTH] Total Request Time');
+        console.log('[ALIAS AUTH] Failed: User inactive');
+        return res.status(401).json({
+          success: false,
+          error: 'Usuario inactivo'
+        });
+      }
+
+      // Verify password using bcrypt
+      console.time('[ALIAS AUTH] BCrypt Compare');
+      const isValidPassword = await bcrypt.compare(password, user.password);
+      console.timeEnd('[ALIAS AUTH] BCrypt Compare');
+      console.log('[ALIAS AUTH] BCrypt result:', isValidPassword ? 'VALID' : 'INVALID');
+
+      if (!isValidPassword) {
+        console.timeEnd('[ALIAS AUTH] Total Request Time');
+        console.log('[ALIAS AUTH] Failed: Invalid password');
+        return res.status(401).json({
+          success: false,
+          error: 'Credenciales inválidas'
+        });
+      }
+
+      // Update last_login
+      console.time('[ALIAS AUTH] UPDATE last_login');
+      await client.query(
+        'UPDATE users SET last_login = NOW() WHERE id = $1',
+        [user.id]
+      );
+      console.timeEnd('[ALIAS AUTH] UPDATE last_login');
+
+      // For APODERADO users, find their applicationId
+      let applicationId = null;
+      if (user.role === 'APODERADO') {
+        console.time('[ALIAS AUTH] SELECT Application ID');
+        const applicationQuery = await client.query(
+          'SELECT id FROM applications WHERE applicant_user_id = $1 ORDER BY created_at DESC LIMIT 1',
+          [user.id]
+        );
+        console.timeEnd('[ALIAS AUTH] SELECT Application ID');
+        if (applicationQuery.rows.length > 0) {
+          applicationId = applicationQuery.rows[0].id;
+        }
+      }
+
+      // Create JWT token
+      console.time('[ALIAS AUTH] Generate JWT Token');
+      const header = Buffer.from(JSON.stringify({alg: "HS256", typ: "JWT"})).toString('base64');
+      const payload = Buffer.from(JSON.stringify({
+        userId: user.id.toString(),
+        email: user.email,
+        role: user.role,
+        iat: Math.floor(Date.now() / 1000),
+        exp: Math.floor(Date.now() / 1000) + (24 * 60 * 60) // 24 hours
+      })).toString('base64');
+      const signature = "mock-signature";
+      const token = `${header}.${payload}.${signature}`;
+      console.timeEnd('[ALIAS AUTH] Generate JWT Token');
+
+      const responseData = {
+        success: true,
+        message: 'Login exitoso',
+        token: token,
+        id: user.id.toString(),
+        firstName: user.first_name,
+        lastName: user.last_name,
+        email: user.email,
+        role: user.role,
+        subject: user.subject
+      };
+
+      if (applicationId !== null) {
+        responseData.applicationId = applicationId;
+      }
+
+      console.timeEnd('[ALIAS AUTH] Total Request Time');
+      console.log('[ALIAS AUTH] Success! Total duration:', Date.now() - loginStartTime, 'ms');
+      res.json(responseData);
+
+    } catch (error) {
+      console.timeEnd('[ALIAS AUTH] Total Request Time');
+      console.error('[ALIAS AUTH] ERROR:', error.message);
+      res.status(500).json({
+        success: false,
+        error: 'Error interno del servidor'
+      });
+    } finally {
+      client.release();
+    }
+  });
+} else {
+  logger.info('[RAILWAY WORKAROUND] Alias auth route disabled via FEATURE_ALT_AUTH_PATH=false');
+}
+
 // Public register endpoint for new APODERADO users - NO CSRF FOR REGISTRATION
 // Same reasoning as login: public endpoint that creates the session
 app.post('/api/auth/register', decryptCredentials, async (req, res) => {
