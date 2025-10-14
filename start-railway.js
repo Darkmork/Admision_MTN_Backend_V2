@@ -38,7 +38,7 @@ console.log('');
 
 // Services configuration
 const services = [
-  { name: 'user', script: 'mock-user-service.js', port: 8082, routes: ['/api/auth', '/api/users'] },
+  { name: 'user', script: 'mock-user-service.js', port: 8082, routes: ['/api/auth', '/api/security', '/api/users'] },
   { name: 'application', script: 'mock-application-service.js', port: 8083, routes: ['/api/applications', '/api/documents'] },
   { name: 'evaluation', script: 'mock-evaluation-service.js', port: 8084, routes: ['/api/evaluations', '/api/interviews'] },
   { name: 'notification', script: 'mock-notification-service.js', port: 8085, routes: ['/api/notifications', '/api/email'] },
