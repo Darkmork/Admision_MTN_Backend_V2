@@ -1589,17 +1589,33 @@ app.get('/api/email-templates/all', (req, res) => {
 const { Pool } = require('pg');
 const createLogger = require('../../../shared/utils/logger');
 const logger = createLogger('notification-service');
-const dbPool = new Pool({
-  host: process.env.DB_HOST || 'localhost',
-  port: parseInt(process.env.DB_PORT || '5432'),
-  database: process.env.DB_NAME || 'Admisión_MTN_DB',
-  user: process.env.DB_USERNAME || 'admin',
-  password: process.env.DB_PASSWORD || 'admin123',
-  ssl: false, // No SSL for Railway internal network
-  max: 20,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000
-});
+
+// Database configuration with connection pooling
+// PRIORITY 1: Use Railway DATABASE_URL if available (single connection string)
+// PRIORITY 2: Fall back to individual env vars for local development
+const dbPool = process.env.DATABASE_URL
+  ? new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: false, // Railway internal network doesn't need SSL
+      max: 20,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 2000,
+      query_timeout: 5000
+    })
+  : new Pool({
+      host: process.env.DB_HOST || 'localhost',
+      port: parseInt(process.env.DB_PORT || '5432'),
+      database: process.env.DB_NAME || 'Admisión_MTN_DB',
+      user: process.env.DB_USERNAME || 'admin',
+      password: process.env.DB_PASSWORD || 'admin123',
+      ssl: false,
+      max: 20,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 2000,
+      query_timeout: 5000
+    });
+
+logger.info(`[DB] Using ${process.env.DATABASE_URL ? 'Railway DATABASE_URL' : 'local environment variables'}`);
 
 // GET all notification configurations
 app.get('/api/notifications/config', async (req, res) => {
