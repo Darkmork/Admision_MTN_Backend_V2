@@ -1587,7 +1587,7 @@ app.get('/api/email-templates/all', (req, res) => {
 // Admin endpoints to manage notification configurations
 
 const { Pool } = require('pg');
-const createLogger = require('./logger');
+const createLogger = require('../../../shared/utils/logger');
 const logger = createLogger('notification-service');
 const dbPool = new Pool({
   host: process.env.DB_HOST || 'localhost',
