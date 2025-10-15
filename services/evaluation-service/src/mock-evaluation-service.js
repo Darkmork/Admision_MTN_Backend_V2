@@ -3,7 +3,9 @@ const compression = require('compression');
 const { Pool } = require('pg');
 const CircuitBreaker = require('opossum');
 const axios = require('axios');
-const { translateToSpanish, translateArrayToSpanish } = require('./translations');
+const { translateToSpanish, translateArrayToSpanish } = require('../../../scripts/utility/translations');
+const createLogger = require('../../../shared/utils/logger');
+const logger = createLogger('evaluation-service');
 const app = express();
 const port = 8084;
 
@@ -5193,8 +5195,7 @@ app.put('/api/evaluations/:evaluationId/reassign/:newEvaluatorId', (req, res) =>
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const createLogger = require('./logger');
-const logger = createLogger('evaluation-service');
+// Logger already defined at top of file
 
 // Configure multer for file uploads
 const storage = multer.diskStorage({

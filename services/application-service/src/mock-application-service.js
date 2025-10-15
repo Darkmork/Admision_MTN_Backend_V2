@@ -6,12 +6,12 @@ const axios = require('axios');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const createLogger = require('./logger');
+const createLogger = require('../../../shared/utils/logger');
 const logger = createLogger('application-service');
 const PDFDocument = require('pdfkit');
-const { translateToSpanish } = require('./translations');
-const { validateRUT } = require('./utils/validateRUT');
-const { logAudit, getClientIp, getUserAgent, AuditActions, EntityTypes } = require('./utils/auditLogger');
+const { translateToSpanish } = require('../../../scripts/utility/translations');
+const { validateRUT } = require('../../../utils/validateRUT');
+const { logAudit, getClientIp, getUserAgent, AuditActions, EntityTypes } = require('../../../utils/auditLogger');
 const app = express();
 const port = 8083;
 
