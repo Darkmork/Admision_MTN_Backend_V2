@@ -179,8 +179,14 @@ console.log('⏳ Waiting for services to be healthy...\n');
       maxAge: 86400
     }));
 
-    app.use(express.json({ limit: '50mb' }));
-    app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+    // CRITICAL FIX: Do NOT parse body at gateway level
+    // Let http-proxy-middleware stream the raw body to backend services
+    // Body parsing happens at the service level (mock-user-service.js, etc.)
+    //
+    // REMOVED: app.use(express.json({ limit: '50mb' }));
+    // REMOVED: app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+    //
+    // This fixes Railway "BadRequestError: request aborted" on POST requests
 
     // Request logging (only non-health requests)
     app.use((req, res, next) => {
@@ -260,15 +266,12 @@ console.log('⏳ Waiting for services to be healthy...\n');
           target
         });
       },
-      onProxyReq: (proxyReq, req) => {
-        // Forward original headers
-        if (req.body && Object.keys(req.body).length > 0) {
-          const bodyData = JSON.stringify(req.body);
-          proxyReq.setHeader('Content-Type', 'application/json');
-          proxyReq.setHeader('Content-Length', Buffer.byteLength(bodyData));
-          proxyReq.write(bodyData);
-        }
-      }
+      // CRITICAL FIX: Remove onProxyReq body rewriting
+      // The gateway no longer parses req.body, so we must stream the raw request
+      // This fixes Railway "BadRequestError: request aborted" on POST requests
+      //
+      // REMOVED: onProxyReq body rewriting logic
+      // http-proxy-middleware will now stream the raw body directly to backend
     });
 
     // Mount service proxies
