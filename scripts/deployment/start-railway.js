@@ -37,13 +37,14 @@ console.log(`🗄️  Database: ${process.env.DATABASE_URL ? 'Railway PostgreSQL
 console.log('');
 
 // Services configuration
+// CRITICAL: After modular reorganization, service files are in services/*/src/
 const services = [
-  { name: 'user', script: 'mock-user-service.js', port: 8082, routes: ['/api/auth', '/api/security', '/api/users'] },
-  { name: 'application', script: 'mock-application-service.js', port: 8083, routes: ['/api/applications', '/api/documents'] },
-  { name: 'evaluation', script: 'mock-evaluation-service.js', port: 8084, routes: ['/api/evaluations', '/api/interviews'] },
-  { name: 'notification', script: 'mock-notification-service.js', port: 8085, routes: ['/api/notifications', '/api/email'] },
-  { name: 'dashboard', script: 'mock-dashboard-service.js', port: 8086, routes: ['/api/dashboard', '/api/analytics'] },
-  { name: 'guardian', script: 'mock-guardian-service.js', port: 8087, routes: ['/api/guardians'] }
+  { name: 'user', script: 'services/user-service/src/mock-user-service.js', port: 8082, routes: ['/api/auth', '/api/security', '/api/users'] },
+  { name: 'application', script: 'services/application-service/src/mock-application-service.js', port: 8083, routes: ['/api/applications', '/api/documents'] },
+  { name: 'evaluation', script: 'services/evaluation-service/src/mock-evaluation-service.js', port: 8084, routes: ['/api/evaluations', '/api/interviews'] },
+  { name: 'notification', script: 'services/notification-service/src/mock-notification-service.js', port: 8085, routes: ['/api/notifications', '/api/email'] },
+  { name: 'dashboard', script: 'services/dashboard-service/src/mock-dashboard-service.js', port: 8086, routes: ['/api/dashboard', '/api/analytics'] },
+  { name: 'guardian', script: 'services/guardian-service/src/mock-guardian-service.js', port: 8087, routes: ['/api/guardians'] }
 ];
 
 const runningProcesses = [];
