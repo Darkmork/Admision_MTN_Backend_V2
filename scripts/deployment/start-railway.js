@@ -259,17 +259,14 @@ console.log('⏳ Waiting for services to be healthy...\n');
         }
       },
       onProxyReq: (proxyReq, req, res) => {
-        // CRITICAL FIX: Properly forward JSON body for POST/PUT requests
-        if (req.body && (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH')) {
-          const bodyData = JSON.stringify(req.body);
-          proxyReq.setHeader('Content-Type', 'application/json');
-          proxyReq.setHeader('Content-Length', Buffer.byteLength(bodyData));
-          // Remove existing body and write new one
-          proxyReq.removeHeader('Transfer-Encoding');
-          proxyReq.write(bodyData);
-          proxyReq.end();
-        }
         console.log(`[PROXY REQUEST] ${req.method} ${req.originalUrl} → ${target}${routePrefix + req.url}`);
+
+        // CRITICAL FIX: http-proxy-middleware handles body forwarding automatically
+        // when express.json() parses req.body. We should NOT manually write/end.
+        // The original code was INTERFERING with the automatic forwarding.
+
+        // DO NOTHING - let http-proxy-middleware handle it automatically
+        // The middleware will read from req (the IncomingMessage stream) and pipe to proxyReq
       },
       onProxyRes: (proxyRes, req, res) => {
         console.log(`[PROXY RESPONSE] ${req.method} ${req.originalUrl} ← ${proxyRes.statusCode}`);
@@ -280,10 +277,10 @@ console.log('⏳ Waiting for services to be healthy...\n');
     services.forEach(service => {
       service.routes.forEach(route => {
         console.log(`   Mounting ${route}/** → http://localhost:${service.port}${route}`);
-        // CRITICAL: createProxyMiddleware will preserve the path after the route prefix
-        // Example: /api/auth/login with route=/api/auth → forwards /login to service
-        // Service must handle both /api/auth/login (if pathRewrite used) or /login (current)
-        app.use(route, express.json(), createProxyMiddleware(proxyOptions(`http://localhost:${service.port}`, route)));
+        // CRITICAL: Do NOT add express.json() here - it consumes the request body stream
+        // http-proxy-middleware needs the raw stream to pipe to the backend service
+        // The backend service will parse JSON itself
+        app.use(route, createProxyMiddleware(proxyOptions(`http://localhost:${service.port}`, route)));
       });
     });
 
