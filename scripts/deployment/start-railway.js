@@ -240,42 +240,50 @@ console.log('⏳ Waiting for services to be healthy...\n');
     const proxyOptions = (target, routePrefix) => ({
       target,
       changeOrigin: true,
-      logLevel: 'silent',
-      timeout: 30000,
-      proxyTimeout: 30000,
-      pathRewrite: (path, req) => {
-        // CRITICAL FIX: Express strips the route prefix when using app.use(route, middleware)
-        // We must reconstruct the full original path by prepending the route prefix
-        const fullPath = routePrefix + path;
-        console.log(`Proxying: ${req.originalUrl} → ${target}${fullPath}`);
-        return fullPath;
-      },
+      logLevel: 'warn', // Changed from 'silent' to see proxy errors
+      timeout: 10000, // Reduced from 30s to 10s (Railway's timeout is 30s, service should respond faster)
+      proxyTimeout: 10000,
+      // CRITICAL FIX: Do NOT rewrite path - Express already stripped the route prefix
+      // and http-proxy-middleware will forward the remaining path correctly
+      pathRewrite: undefined, // Let proxy forward path as-is
       onError: (err, req, res) => {
-        console.error(`Proxy error for ${req.originalUrl}:`, err.message);
-        res.status(502).json({
-          error: 'Bad Gateway',
-          message: 'Service temporarily unavailable',
-          path: req.originalUrl,
-          target
-        });
+        console.error(`[PROXY ERROR] ${req.method} ${req.originalUrl} → ${target}${routePrefix}: ${err.message}`);
+        if (!res.headersSent) {
+          res.status(502).json({
+            error: 'Bad Gateway',
+            message: 'Service temporarily unavailable',
+            path: req.originalUrl,
+            target,
+            details: err.message
+          });
+        }
       },
-      onProxyReq: (proxyReq, req) => {
-        // Forward original headers
-        if (req.body && Object.keys(req.body).length > 0) {
+      onProxyReq: (proxyReq, req, res) => {
+        // CRITICAL FIX: Properly forward JSON body for POST/PUT requests
+        if (req.body && (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH')) {
           const bodyData = JSON.stringify(req.body);
           proxyReq.setHeader('Content-Type', 'application/json');
           proxyReq.setHeader('Content-Length', Buffer.byteLength(bodyData));
+          // Remove existing body and write new one
+          proxyReq.removeHeader('Transfer-Encoding');
           proxyReq.write(bodyData);
+          proxyReq.end();
         }
+        console.log(`[PROXY REQUEST] ${req.method} ${req.originalUrl} → ${target}${routePrefix + req.url}`);
+      },
+      onProxyRes: (proxyRes, req, res) => {
+        console.log(`[PROXY RESPONSE] ${req.method} ${req.originalUrl} ← ${proxyRes.statusCode}`);
       }
     });
 
-    // Mount service proxies
+    // Mount service proxies with proper path handling
     services.forEach(service => {
       service.routes.forEach(route => {
-        console.log(`   Mounting ${route} → http://localhost:${service.port}`);
-        // CRITICAL: Pass the route prefix so pathRewrite can reconstruct full path
-        app.use(route, createProxyMiddleware(proxyOptions(`http://localhost:${service.port}`, route)));
+        console.log(`   Mounting ${route}/** → http://localhost:${service.port}${route}`);
+        // CRITICAL: createProxyMiddleware will preserve the path after the route prefix
+        // Example: /api/auth/login with route=/api/auth → forwards /login to service
+        // Service must handle both /api/auth/login (if pathRewrite used) or /login (current)
+        app.use(route, express.json(), createProxyMiddleware(proxyOptions(`http://localhost:${service.port}`, route)));
       });
     });
 
