@@ -9,19 +9,33 @@ Sistema de Admisión for Colegio Monte Tabor y Nazaret - A comprehensive school 
 ## Architecture
 
 ### Current Setup
-- **API Gateway**: NGINX on port 8080 (local-gateway.conf)
-- **Frontend**: React 19 + TypeScript + Vite on port 5173
-- **Database**: PostgreSQL "Admisión_MTN_DB" (admin/admin123)
-- **Services**: Mix of Node.js mock services and Spring Boot microservices
+- **API Gateway**: NGINX on port 8080 (local-gateway.conf) for local development
+- **API Gateway (Railway)**: Node.js Express proxy on port 8080 (start-railway.js) for production
+- **Frontend**: React 19 + TypeScript + Vite on port 5173 (local), Vercel (production)
+- **Database**: PostgreSQL "Admisión_MTN_DB" (admin/admin123) for local, Railway PostgreSQL for production
+- **Services**: Modular Node.js mock services in `services/*/src/` directory structure
 
 ### Service Ports
-- User Service: 8082
-- Application Service: 8083
-- Evaluation Service: 8084
-- Notification Service: 8085
-- Dashboard Service: 8086
-- Guardian Service: 8087 (mock-guardian-service.js) **[FIXED: was incorrectly listed as 8085]**
-- Eureka Server: 8761
+- User Service: 8082 (`services/user-service/src/mock-user-service.js`)
+- Application Service: 8083 (`services/application-service/src/mock-application-service.js`)
+- Evaluation Service: 8084 (`services/evaluation-service/src/mock-evaluation-service.js`)
+- Notification Service: 8085 (`services/notification-service/src/mock-notification-service.js`)
+- Dashboard Service: 8086 (`services/dashboard-service/src/mock-dashboard-service.js`)
+- Guardian Service: 8087 (`services/guardian-service/src/mock-guardian-service.js`)
+
+### Deployment Architecture
+
+#### Local Development
+- NGINX gateway on port 8080 routing to 6 Node.js mock services
+- PostgreSQL local database with individual env vars (DB_HOST, DB_PORT, etc.)
+- Frontend on Vite dev server (port 5173)
+
+#### Railway Production
+- **URL**: https://admisionmtnbackendv2-production.up.railway.app
+- **Gateway**: Node.js Express proxy (`scripts/deployment/start-railway.js`)
+- **Services**: All 6 microservices in monorepo structure
+- **Database**: Railway PostgreSQL with `DATABASE_URL` connection string
+- **Frontend**: Vercel deployment at https://admision-mtn-front.vercel.app
 
 ## Development Commands
 
@@ -190,8 +204,45 @@ curl http://localhost:8083/health  # Application service
 
 ## Environment Variables
 
+### Railway Production (Priority 1)
+Railway automatically provides `DATABASE_URL` as a single PostgreSQL connection string:
 ```bash
-# Database
+# Railway PostgreSQL (provided automatically)
+DATABASE_URL=postgresql://postgres:password@postgres.railway.internal:5432/railway
+
+# Railway Gateway Port (provided automatically)
+PORT=8080
+
+# JWT (configure in Railway dashboard)
+JWT_SECRET=your_production_jwt_secret
+JWT_EXPIRATION_TIME=86400000
+
+# Email SMTP (configure in Railway dashboard)
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USERNAME=jorge.gangale@mtn.cl
+SMTP_PASSWORD=${SMTP_PASSWORD}
+EMAIL_MOCK_MODE=false
+
+# Node Environment
+NODE_ENV=production
+```
+
+**CRITICAL:** All 6 microservices use priority-based database configuration:
+1. **PRIORITY 1**: Use `DATABASE_URL` if available (Railway production)
+2. **PRIORITY 2**: Fall back to individual env vars (local development)
+
+This pattern is implemented in all service files:
+- `services/user-service/src/mock-user-service.js:188-213`
+- `services/application-service/src/mock-application-service.js:24-49`
+- `services/evaluation-service/src/mock-evaluation-service.js:15-40`
+- `services/notification-service/src/mock-notification-service.js:1589-1618`
+- `services/dashboard-service/src/mock-dashboard-service.js:11-36`
+- `services/guardian-service/src/mock-guardian-service.js:38-63`
+
+### Local Development (Priority 2)
+```bash
+# Database (individual connection parameters)
 DB_HOST=localhost
 DB_PORT=5432
 DB_NAME=Admisión_MTN_DB
@@ -212,15 +263,22 @@ EMAIL_MOCK_MODE=true
 # Services
 API_GATEWAY_PORT=8080
 FRONTEND_PORT=5173
+NODE_ENV=development
 ```
 
 ## Critical Files
 
 ### Configuration
-- `local-gateway.conf`: NGINX gateway configuration for mock services
-- `gateway-microservices.conf`: Full microservices NGINX configuration
-- `mock-*.js`: Node.js mock service implementations
-- `package.json`: Backend dependencies (express, bcryptjs, pg, axios, nodemailer)
+- `local-gateway.conf`: NGINX gateway configuration for local development
+- `scripts/deployment/start-railway.js`: Railway production startup script (API gateway + 6 services)
+- `services/*/src/*.js`: Modular microservice implementations
+  - `services/user-service/src/mock-user-service.js`: Authentication and user management
+  - `services/application-service/src/mock-application-service.js`: Applications and documents
+  - `services/evaluation-service/src/mock-evaluation-service.js`: Evaluations and interviews
+  - `services/notification-service/src/mock-notification-service.js`: Email and notifications
+  - `services/dashboard-service/src/mock-dashboard-service.js`: Analytics and dashboards
+  - `services/guardian-service/src/mock-guardian-service.js`: Guardian/parent management
+- `package.json`: Backend dependencies (express, bcryptjs, pg, axios, nodemailer, opossum, cors, http-proxy-middleware)
 - `services/api.ts`: Frontend API configuration
 - `vite.config.ts`: Vite build configuration
 
@@ -229,6 +287,8 @@ FRONTEND_PORT=5173
 - `INTEGRATION_GUIDE.md`: Frontend-backend integration
 - `API_CONSOLIDATION_STRATEGY.md`: API architecture strategy
 - `README_DEVOPS.md`: DevOps and deployment documentation
+- `CIRCUIT_BREAKER_CATEGORIES.md`: Circuit breaker implementation details
+- `CIRCUIT_BREAKER_TEST_PLAN.md`: Circuit breaker testing procedures
 
 ## Testing Workflow
 
@@ -460,6 +520,174 @@ Timeout: 10s per request (reduced from 30s)
 - User Service: 50% hit rate (2 requests, 1 hit)
 - Evaluation Service: 33% hit rate (3 requests, 1 hit)
 - Dashboard Service: 80% hit rate (15 requests, 12 hits)
+
+## Railway Deployment
+
+### Production Environment
+- **Backend URL**: https://admisionmtnbackendv2-production.up.railway.app
+- **Frontend URL**: https://admision-mtn-front.vercel.app
+- **Database**: Railway PostgreSQL (postgres.railway.internal:5432)
+- **Architecture**: Monorepo with 6 microservices + API Gateway
+
+### Deployment Structure
+The system uses a **monorepo architecture** for Railway deployment:
+- **1 package.json** (root level with all dependencies)
+- **0 POM.xml** (no Spring Boot in production)
+- **0 Dockerfiles** (Railway uses Nixpacks auto-detection)
+- **0 railway.toml** (Railway auto-detects Node.js project)
+- **1 start command**: `node scripts/deployment/start-railway.js`
+
+### Critical Railway Configuration
+
+#### 1. API Gateway Body Streaming (`scripts/deployment/start-railway.js:182-189`)
+**CRITICAL FIX:** The gateway must NOT parse request bodies to prevent `BadRequestError: request aborted`.
+
+```javascript
+// CRITICAL FIX: Do NOT parse body at gateway level
+// Let http-proxy-middleware stream the raw body to backend services
+// Body parsing happens at the service level (mock-user-service.js, etc.)
+//
+// REMOVED: app.use(express.json({ limit: '50mb' }));
+// REMOVED: app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+//
+// This fixes Railway "BadRequestError: request aborted" on POST requests
+```
+
+**Why this is critical:**
+- If the gateway parses the body with `express.json()`, the request stream is consumed
+- When `http-proxy-middleware` tries to forward the request, it cannot re-read the consumed stream
+- This causes Railway to abort POST requests with `BadRequestError` at `raw-body/index.js:245`
+- Solution: Remove body parsing from gateway, let services parse their own bodies
+
+#### 2. Database Connection Priority (`services/*/src/*.js`)
+All 6 services use priority-based database configuration:
+
+```javascript
+// Database configuration with connection pooling
+// PRIORITY 1: Use Railway DATABASE_URL if available (single connection string)
+// PRIORITY 2: Fall back to individual env vars for local development
+const dbPool = process.env.DATABASE_URL
+  ? new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: false, // Railway internal network doesn't need SSL
+      max: 20,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 2000,
+      query_timeout: 5000
+    })
+  : new Pool({
+      host: process.env.DB_HOST || 'localhost',
+      port: parseInt(process.env.DB_PORT || '5432'),
+      database: process.env.DB_NAME || 'Admisión_MTN_DB',
+      user: process.env.DB_USERNAME || 'admin',
+      password: process.env.DB_PASSWORD || 'admin123',
+      ssl: false,
+      max: 20,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 2000,
+      query_timeout: 5000
+    });
+
+logger.info(`[DB] Using ${process.env.DATABASE_URL ? 'Railway DATABASE_URL' : 'local environment variables'}`);
+```
+
+**Why this pattern:**
+- Railway provides `DATABASE_URL=postgresql://postgres:password@postgres.railway.internal:5432/railway`
+- Local development uses individual env vars (`DB_HOST`, `DB_PORT`, `DB_NAME`, etc.)
+- Without `DATABASE_URL` support, services default to `localhost:5432` and fail with `ECONNREFUSED ::1:5432`
+- This pattern enables the same codebase to work in both environments
+
+#### 3. Path Rewriting in Proxy (`scripts/deployment/start-railway.js:246-275`)
+**CRITICAL:** Express strips route prefixes when using `app.use(route, middleware)`. The proxy must reconstruct the full path.
+
+```javascript
+const proxyOptions = (target, routePrefix) => ({
+  target,
+  changeOrigin: true,
+  logLevel: 'silent',
+  timeout: 30000,
+  proxyTimeout: 30000,
+  pathRewrite: (path, req) => {
+    // CRITICAL FIX: Express strips the route prefix when using app.use(route, middleware)
+    // We must reconstruct the full original path by prepending the route prefix
+    const fullPath = routePrefix + path;
+    console.log(`Proxying: ${req.originalUrl} → ${target}${fullPath}`);
+    return fullPath;
+  },
+  // CRITICAL FIX: Remove onProxyReq body rewriting
+  // http-proxy-middleware will now stream the raw body directly to backend
+});
+```
+
+### Testing Railway Deployment
+
+```bash
+# Health check
+curl https://admisionmtnbackendv2-production.up.railway.app/health
+
+# Test authentication
+curl -X POST https://admisionmtnbackendv2-production.up.railway.app/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"jorge.gangale@mtn.cl","password":"admin123"}'
+
+# Get users roles
+curl https://admisionmtnbackendv2-production.up.railway.app/api/users/roles
+
+# Dashboard stats
+curl https://admisionmtnbackendv2-production.up.railway.app/api/dashboard/stats
+```
+
+### Railway Environment Variables
+
+Configure these in Railway dashboard:
+```bash
+# Automatic (provided by Railway)
+DATABASE_URL=postgresql://postgres:xxx@postgres.railway.internal:5432/railway
+PORT=8080
+RAILWAY_ENVIRONMENT=production
+
+# Manual configuration required
+JWT_SECRET=your_production_secret
+JWT_EXPIRATION_TIME=86400000
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USERNAME=jorge.gangale@mtn.cl
+SMTP_PASSWORD=xxx
+EMAIL_MOCK_MODE=false
+NODE_ENV=production
+```
+
+### Common Railway Issues
+
+#### Issue 1: POST Requests Return 502
+**Symptom:** `BadRequestError: request aborted` in logs
+**Root Cause:** Gateway parsing body with `express.json()` before proxying
+**Fix:** Remove body parsing middleware from `start-railway.js:182-189`
+
+#### Issue 2: Database Connection Refused
+**Symptom:** `ECONNREFUSED ::1:5432` or `connect ECONNREFUSED localhost:5432`
+**Root Cause:** Services not using Railway `DATABASE_URL`
+**Fix:** Ensure all 6 services have priority-based database configuration (see above)
+
+#### Issue 3: Services Not Starting
+**Symptom:** Health check timeout, services show as crashed
+**Root Cause:** Missing dependencies or incorrect start command
+**Fix:** Ensure `package.json` has all dependencies, start command is `node scripts/deployment/start-railway.js`
+
+### Recent Deployment Fixes (Oct 15, 2025)
+
+**Commit:** `147eb4d` - "fix(railway): Add Railway DATABASE_URL support to all 6 microservices"
+- Fixed POST /api/auth/login returning 502 BadRequestError
+- Added DATABASE_URL support to all 6 services
+- Removed body parsing from API gateway
+- Verified deployment with successful end-to-end tests
+
+**Test Results:**
+- ✅ Gateway health: All 6 services running
+- ✅ GET /api/users/roles: Returns 6 roles
+- ✅ POST /api/auth/login: 200 OK with JWT token
+- ✅ GET /api/dashboard/stats: Real data (38 users, 21 applications)
+- ✅ GET /api/applications: 21 applications with complete data
 
 ## Recent Updates
 
