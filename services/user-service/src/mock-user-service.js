@@ -9,7 +9,12 @@ const { translateToSpanish } = require('../../../scripts/utility/translations');
 const createLogger = require('../../../shared/utils/logger');
 const logger = createLogger('user-service');
 const app = express();
-const port = 8082;
+
+// CRITICAL FIX FOR RAILWAY: Use Railway's dynamic PORT environment variable
+// Railway assigns a random port (not 8082) that the proxy forwards to
+// Without this, the service starts on 8082 but Railway expects it on the assigned PORT
+const port = process.env.PORT || 8082;
+logger.info(`[PORT CONFIG] Using port: ${port} (Railway=${process.env.PORT ? 'YES' : 'NO'})`);
 
 // ============= BCRYPT CONFIGURATION =============
 // BCrypt rounds configuration: trade-off between security and performance
