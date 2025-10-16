@@ -1,0 +1,189 @@
+{
+  "$schema": "https://railway.app/railway.schema.json",
+  "build": {
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "Dockerfile"
+  },
+  "deploy": {
+    "startCommand": "nginx -g 'daemon off;'",
+    "healthcheckPath": "/health",
+    "healthcheckTimeout": 100,
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 5
+  }
+}
+# API Gateway NGINX para Railway
+
+Este directorio contiene la configuración del API Gateway NGINX para el sistema de admisión MTN desplegado en Railway.
+
+## 📁 Estructura
+
+```
+api-gateway/
+├── conf/
+│   ├── local-gateway.conf      # Configuración para desarrollo local
+│   ├── railway-gateway.conf    # Configuración para Railway ⭐
+│   └── nginx-proxy-headers.conf
+├── Dockerfile                   # Para desplegar NGINX en Railway
+├── .env.railway                # Variables de entorno ejemplo
+├── RAILWAY_SETUP.md            # Documentación detallada
+└── README.md                   # Este archivo
+```
+
+## 🚀 Inicio Rápido
+
+### Opción 1: Configuración Automática (Recomendado)
+
+```bash
+# Ejecutar el script de configuración
+./scripts/configure-railway-nginx.sh
+```
+
+Este script te pedirá las URLs de tus servicios y actualizará automáticamente la configuración.
+
+### Opción 2: Configuración Manual
+
+1. **Obtener las URLs de Railway:**
+   - Ve a https://railway.app/dashboard
+   - Para cada servicio, copia su URL pública
+
+2. **Editar la configuración:**
+   ```bash
+   nano api-gateway/conf/railway-gateway.conf
+   ```
+
+3. **Reemplazar las URLs de ejemplo:**
+   ```nginx
+   # Buscar y reemplazar:
+   admision-user-service.railway.app       → TU-URL-REAL.railway.app
+   admision-application-service.railway.app → TU-URL-REAL.railway.app
+   # ... etc
+   ```
+
+## 🐳 Desplegar en Railway
+
+### Método 1: Como servicio independiente
+
+1. **Crear nuevo servicio en Railway:**
+   ```bash
+   railway link
+   railway up
+   ```
+
+2. **Configurar el servicio:**
+   - En Railway dashboard, ve a tu nuevo servicio
+   - Settings → Deploy → Root Directory: `api-gateway`
+   - Railway detectará automáticamente el Dockerfile
+
+3. **Configurar variables de entorno:**
+   - Copia las variables de `.env.railway`
+   - Actualiza con tus URLs reales
+
+### Método 2: Usando Docker localmente
+
+```bash
+# Construir imagen
+docker build -t mtn-gateway ./api-gateway
+
+# Ejecutar
+docker run -p 8080:8080 mtn-gateway
+```
+
+## 🔧 Servicios Configurados
+
+El gateway enruta a los siguientes microservicios:
+
+| Ruta API | Servicio | Puerto Railway |
+|----------|----------|----------------|
+| `/api/auth` | user-service | 443 (HTTPS) |
+| `/api/users` | user-service | 443 (HTTPS) |
+| `/api/applications` | application-service | 443 (HTTPS) |
+| `/api/evaluations` | evaluation-service | 443 (HTTPS) |
+| `/api/interviews` | evaluation-service | 443 (HTTPS) |
+| `/api/notifications` | notification-service | 443 (HTTPS) |
+| `/api/email` | notification-service | 443 (HTTPS) |
+| `/api/dashboard` | dashboard-service | 443 (HTTPS) |
+| `/api/analytics` | dashboard-service | 443 (HTTPS) |
+| `/api/guardians` | guardian-service | 443 (HTTPS) |
+
+## ✅ Verificación
+
+### Probar el gateway localmente:
+
+```bash
+# Health check
+curl http://localhost:8080/health
+
+# Estado del gateway
+curl http://localhost:8080/gateway/status
+
+# Métricas
+curl http://localhost:8080/gateway/metrics
+```
+
+### Probar el gateway en Railway:
+
+```bash
+# Reemplaza con tu URL de Railway
+export GATEWAY_URL="https://tu-gateway.railway.app"
+
+# Health check
+curl $GATEWAY_URL/health
+
+# Probar autenticación
+curl -X POST $GATEWAY_URL/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"test@example.com","password":"test123"}'
+```
+
+## 🔒 Seguridad Configurada
+
+- ✅ **Rate Limiting**: Previene abuso de API
+- ✅ **CORS**: Solo permite orígenes específicos
+- ✅ **HTTPS**: Conexiones SSL/TLS a servicios
+- ✅ **Headers de Seguridad**: XSS, Clickjacking, etc.
+- ✅ **Request Size Limits**: Protección contra payloads grandes
+
+## 📊 Características
+
+- **Keepalive Connections**: Conexiones persistentes para mejor rendimiento
+- **Gzip Compression**: Compresión automática de respuestas
+- **Circuit Breaker**: Timeouts y failover configurados
+- **Health Checks**: Monitoreo de disponibilidad
+- **Custom Error Pages**: Respuestas JSON para errores
+
+## 🐛 Troubleshooting
+
+### Error 502 Bad Gateway
+```bash
+# Verificar que los servicios estén corriendo
+railway status
+
+# Ver logs del gateway
+railway logs
+```
+
+### CORS Errors
+- Verifica que tu frontend esté en la lista de orígenes permitidos
+- Edita el mapa `$cors_origin` en `railway-gateway.conf`
+
+### Timeout Errors
+- Aumenta los timeouts en la configuración:
+  ```nginx
+  proxy_read_timeout 60s;
+  proxy_connect_timeout 30s;
+  ```
+
+## 📚 Documentación Adicional
+
+- [RAILWAY_SETUP.md](./RAILWAY_SETUP.md) - Guía completa de configuración
+- [Documentación NGINX](https://nginx.org/en/docs/)
+- [Railway Docs](https://docs.railway.app/)
+
+## 🆘 Soporte
+
+Si necesitas ayuda:
+1. Revisa los logs: `railway logs`
+2. Verifica la configuración: `nginx -t`
+3. Consulta RAILWAY_SETUP.md para problemas comunes
+
